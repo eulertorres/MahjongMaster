@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.pt
+.venv/
+runs/
+config/shortcuts.json
+dataset/raw/*.png
+dataset/raw/*.jpg
+dataset/raw/*.jpeg
+dataset/images/**/*.png
+dataset/images/**/*.jpg
+dataset/images/**/*.jpeg
+dataset/labels/**/*.txt

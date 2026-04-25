@@ -1,0 +1,44 @@
+path: ../dataset
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: man_1
+  1: man_2
+  2: man_3
+  3: man_4
+  4: man_5
+  5: man_6
+  6: man_7
+  7: man_8
+  8: man_9
+  9: pin_1
+  10: pin_2
+  11: pin_3
+  12: pin_4
+  13: pin_5
+  14: pin_6
+  15: pin_7
+  16: pin_8
+  17: pin_9
+  18: sou_1
+  19: sou_2
+  20: sou_3
+  21: sou_4
+  22: sou_5
+  23: sou_6
+  24: sou_7
+  25: sou_8
+  26: sou_9
+  27: wind_east
+  28: wind_south
+  29: wind_west
+  30: wind_north
+  31: dragon_white
+  32: dragon_green
+  33: dragon_red
+  34: face_down
+  35: man_5_red
+  36: pin_5_red
+  37: sou_5_red

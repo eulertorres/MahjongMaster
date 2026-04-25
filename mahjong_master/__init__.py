@@ -1,0 +1,1 @@
+"""MahjongMaster desktop tooling."""
