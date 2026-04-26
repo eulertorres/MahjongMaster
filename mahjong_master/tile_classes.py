@@ -33,7 +33,6 @@ TILE_CLASSES = [
     "dragon_white",
     "dragon_green",
     "dragon_red",
-    "face_down",
     "man_5_red",
     "pin_5_red",
     "sou_5_red",

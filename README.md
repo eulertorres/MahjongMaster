@@ -18,14 +18,13 @@ A preview atualiza em 3 Hz. Use **Salvar screenshot** ou pressione **F3** para s
 
 ## Comecando com YOLO
 
-A estrategia inicial e treinar um detector unico com 35 classes:
+A estrategia inicial e treinar um detector unico com 37 classes:
 
 - `man_1` a `man_9`
 - `pin_1` a `pin_9`
 - `sou_1` a `sou_9`
 - `wind_east`, `wind_south`, `wind_west`, `wind_north`
 - `dragon_white`, `dragon_green`, `dragon_red`
-- `face_down`
 - `man_5_red`, `pin_5_red`, `sou_5_red`
 
 ### 1. Coletar screenshots
@@ -149,3 +148,47 @@ Na tela principal:
 - use **Pausar apos proximo predict** para rodar apenas uma predicao e congelar o modo predict
 
 O overlay desenha as bounding boxes e labels diretamente na preview da janela monitorada.
+A primeira camada de leitura de jogo tenta identificar sua mao, chamadas abertas e yakus provaveis.
+Detalhes da arquitetura e limitacoes estao em [`docs/game_logic.md`](docs/game_logic.md).
+
+### 6. Treinar no Google Colab
+
+Gere um pacote do dataset local:
+
+```powershell
+python scripts/prepare_colab_package.py
+```
+
+Isso cria:
+
+```text
+colab_packages/mahjongmaster_colab_dataset.zip
+```
+
+No Google Drive, crie a pasta:
+
+```text
+MyDrive/MahjongMaster
+```
+
+Envie o `.zip` para essa pasta. Depois abra:
+
+```text
+notebooks/train_colab.ipynb
+```
+
+No Colab:
+
+1. Use **Runtime > Change runtime type > GPU**.
+2. Rode as celulas em ordem.
+3. Se ainda nao enviou o pacote ao Drive, use a celula **Upload do dataset** no proprio notebook.
+4. Rode a celula **TensorBoard** antes do treino para monitorar losses, metricas, matriz de confusao e imagens geradas.
+5. Ajuste `MODEL`, `EPOCHS`, `IMGSZ`, `BATCH` e `PATIENCE` na celula de treino.
+
+O resultado volta para:
+
+```text
+MyDrive/MahjongMaster/runs/detect/<nome_do_treino>
+```
+
+Baixe ou copie o `weights/best.pt` para `runs/detect` local se quiser usar no predict do app.

@@ -3,6 +3,7 @@ __pycache__/
 *.pt
 .venv/
 runs/
+colab_packages/
 config/shortcuts.json
 dataset/raw/*.png
 dataset/raw/*.jpg
@@ -11,3 +12,4 @@ dataset/images/**/*.png
 dataset/images/**/*.jpg
 dataset/images/**/*.jpeg
 dataset/labels/**/*.txt
+dataset/labels/**/*.cache

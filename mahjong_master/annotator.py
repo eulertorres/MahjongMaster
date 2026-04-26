@@ -362,7 +362,6 @@ class AnnotatorWindow(QMainWindow):
                 ("dragon_white", "White"),
                 ("dragon_green", "Green"),
                 ("dragon_red", "Red"),
-                ("face_down", "Face down"),
             ],
         }
 

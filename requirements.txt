@@ -1,2 +1,5 @@
 PyQt6>=6.6
 mss>=9.0
+numpy>=1.26
+torch>=2.11
+ultralytics>=8.4

@@ -4,6 +4,7 @@ import ctypes
 import ctypes.wintypes as wintypes
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,15 +20,17 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
-    QSpinBox,
     QStatusBar,
     QVBoxLayout,
     QWidget,
 )
 
 from mahjong_master.annotator import AnnotatorWindow
+from mahjong_master.game_analyzer import GameAnalyzer, detections_from_yolo_result
+from mahjong_master.mahjong_logic import HandState, tile_from_name
 from mahjong_master.theme import apply_dark_theme
 
 
@@ -38,6 +41,9 @@ DEFAULT_WINDOW_TITLE = "MahjongSoul-Steam"
 HOTKEY_ID_SAVE_SCREENSHOT = 1
 VK_F3 = 0x72
 WM_HOTKEY = 0x0312
+CAPTURE_WIDTH = 1592
+CAPTURE_HEIGHT = 933
+PREDICT_IMAGE_SIZE = 1592
 
 user32 = ctypes.windll.user32
 dwmapi = ctypes.windll.dwmapi
@@ -197,16 +203,20 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("MahjongMaster - Monitor de Janela")
-        self.resize(980, 680)
+        self.resize(600, 600)
         self.screen_capture = mss.MSS()
         self.last_capture: QImage | None = None
         self.prediction_model = None
         self.prediction_model_path: Path | None = None
+        self.predict_runtime_error: str | None = None
+        self.capture_count = 0
+        self.predict_count = 0
+        self.last_game_summary = "Hand: - | Yaku provavel: -"
         self.annotator_window: AnnotatorWindow | None = None
         self.training_window = None
 
         self.window_combo = QComboBox()
-        self.window_combo.setMinimumWidth(420)
+        self.window_combo.setMinimumWidth(160)
         self.window_combo.currentIndexChanged.connect(self.capture_once)
 
         self.refresh_button = QPushButton("Atualizar janelas")
@@ -222,37 +232,40 @@ class MainWindow(QMainWindow):
         self.training_button.clicked.connect(self.open_training)
 
         self.model_combo = QComboBox()
-        self.model_combo.setMinimumWidth(260)
+        self.model_combo.setMinimumWidth(180)
         self.model_combo.currentIndexChanged.connect(self.unload_prediction_model)
-
-        self.refresh_models_button = QPushButton("Modelos")
-        self.refresh_models_button.clicked.connect(self.refresh_model_list_from_button)
 
         self.predict_checkbox = QCheckBox("Predict")
         self.predict_checkbox.stateChanged.connect(self.predict_setting_changed)
 
+        self.predict_once_button = QPushButton("Predict 1x")
+        self.predict_once_button.clicked.connect(self.predict_once_clicked)
+
         self.predict_fps_input = QDoubleSpinBox()
         self.predict_fps_input.setRange(0.2, 60.0)
         self.predict_fps_input.setSingleStep(0.5)
-        self.predict_fps_input.setValue(3.0)
+        self.predict_fps_input.setValue(30.0)
         self.predict_fps_input.setSuffix(" FPS")
         self.predict_fps_input.valueChanged.connect(self.predict_setting_changed)
-
-        self.predict_imgsz_input = QSpinBox()
-        self.predict_imgsz_input.setRange(320, 2048)
-        self.predict_imgsz_input.setSingleStep(32)
-        self.predict_imgsz_input.setValue(960)
 
         self.predict_conf_input = QDoubleSpinBox()
         self.predict_conf_input.setRange(0.01, 0.99)
         self.predict_conf_input.setSingleStep(0.05)
-        self.predict_conf_input.setValue(0.25)
+        self.predict_conf_input.setValue(0.50)
+        self.predict_conf_input.valueChanged.connect(self.predict_parameter_changed)
 
         self.pause_after_predict_checkbox = QCheckBox("Pausar apos proximo predict")
 
+        self.preview_checkbox = QCheckBox("Preview")
+        self.preview_checkbox.setChecked(True)
+        self.preview_checkbox.stateChanged.connect(self.preview_setting_changed)
+
+        self.debug_checkbox = QCheckBox("DEBUG")
+        self.debug_checkbox.stateChanged.connect(self.debug_setting_changed)
+
         self.preview_label = QLabel("Selecione uma janela aberta para iniciar a preview.")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setMinimumSize(640, 360)
+        self.preview_label.setMinimumSize(160, 100)
         self.preview_label.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
@@ -261,31 +274,72 @@ class MainWindow(QMainWindow):
             "QLabel { background: #0B1220; color: #E5E7EB; border: 1px solid #374151; }"
         )
 
-        controls = QHBoxLayout()
-        controls.addWidget(QLabel("Janela:"))
-        controls.addWidget(self.window_combo, stretch=1)
-        controls.addWidget(self.refresh_button)
-        controls.addWidget(self.save_button)
-        controls.addWidget(self.annotator_button)
-        controls.addWidget(self.training_button)
+        self.debug_state_label = QLabel("Capturas: 0 | Predicts: 0")
+        self.debug_state_label.setVisible(False)
+        self.game_summary_log = QPlainTextEdit()
+        self.game_summary_log.setReadOnly(True)
+        self.game_summary_log.setMinimumHeight(210)
+        self.game_summary_log.document().setMaximumBlockCount(250)
+        self.game_summary_log.setPlaceholderText("Resumo da mao aparece aqui apos o predict.")
+
+        self.debug_log = QPlainTextEdit()
+        self.debug_log.setReadOnly(True)
+        self.debug_log.setMaximumHeight(95)
+        self.debug_log.document().setMaximumBlockCount(250)
+        self.debug_log.setPlaceholderText("Logs tecnicos aparecem aqui com DEBUG ligado.")
+        self.debug_log.setVisible(False)
+
+        window_controls = QHBoxLayout()
+        window_controls.setContentsMargins(0, 0, 0, 0)
+        window_controls.addWidget(QLabel("Janela:"))
+        window_controls.addWidget(self.window_combo, stretch=1)
+        self.refresh_button.setText("Atualizar")
+        window_controls.addWidget(self.refresh_button)
+
+        action_controls = QHBoxLayout()
+        action_controls.setContentsMargins(0, 0, 0, 0)
+        self.save_button.setText("Screenshot F3")
+        self.annotator_button.setText("Anotar")
+        self.training_button.setText("Treino")
+        action_controls.addWidget(self.save_button)
+        action_controls.addWidget(self.annotator_button)
+        action_controls.addWidget(self.training_button)
+        action_controls.addStretch(1)
+
+        model_controls = QHBoxLayout()
+        model_controls.setContentsMargins(0, 0, 0, 0)
+        model_controls.addWidget(QLabel("Modelo:"))
+        model_controls.addWidget(self.model_combo, stretch=1)
 
         predict_controls = QHBoxLayout()
-        predict_controls.addWidget(QLabel("Modelo:"))
-        predict_controls.addWidget(self.model_combo, stretch=1)
-        predict_controls.addWidget(self.refresh_models_button)
+        predict_controls.setContentsMargins(0, 0, 0, 0)
         predict_controls.addWidget(self.predict_checkbox)
+        predict_controls.addWidget(self.predict_once_button)
+        predict_controls.addWidget(self.preview_checkbox)
+        predict_controls.addWidget(self.debug_checkbox)
         predict_controls.addWidget(QLabel("Taxa:"))
         predict_controls.addWidget(self.predict_fps_input)
-        predict_controls.addWidget(QLabel("Imagem:"))
-        predict_controls.addWidget(self.predict_imgsz_input)
-        predict_controls.addWidget(QLabel("Conf:"))
-        predict_controls.addWidget(self.predict_conf_input)
-        predict_controls.addWidget(self.pause_after_predict_checkbox)
+        predict_controls.addStretch(1)
+
+        predict_options = QHBoxLayout()
+        predict_options.setContentsMargins(0, 0, 0, 0)
+        predict_options.addWidget(QLabel("Conf:"))
+        predict_options.addWidget(self.predict_conf_input)
+        predict_options.addWidget(self.pause_after_predict_checkbox)
+        predict_options.addStretch(1)
 
         root_layout = QVBoxLayout()
-        root_layout.addLayout(controls)
+        root_layout.setContentsMargins(8, 8, 8, 8)
+        root_layout.setSpacing(6)
+        root_layout.addLayout(window_controls)
+        root_layout.addLayout(action_controls)
+        root_layout.addLayout(model_controls)
         root_layout.addLayout(predict_controls)
+        root_layout.addLayout(predict_options)
         root_layout.addWidget(self.preview_label, stretch=1)
+        root_layout.addWidget(self.debug_state_label)
+        root_layout.addWidget(self.game_summary_log, stretch=1)
+        root_layout.addWidget(self.debug_log)
 
         root = QWidget()
         root.setLayout(root_layout)
@@ -298,7 +352,10 @@ class MainWindow(QMainWindow):
 
         self.refresh_model_list()
         self.refresh_windows()
+        self.refresh_timer_interval()
         self.timer.start()
+        self.set_game_summary(self.last_game_summary)
+        self.log_debug("App iniciado.")
 
     def refresh_windows(self) -> None:
         current_hwnd = self.selected_hwnd()
@@ -336,12 +393,49 @@ class MainWindow(QMainWindow):
         hwnd = self.window_combo.currentData()
         return int(hwnd) if hwnd is not None else None
 
-    def capture_once(self) -> None:
+    def log_debug(self, message: str) -> None:
+        if not self.debug_checkbox.isChecked():
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        line = f"[{timestamp}] {message}"
+        print(line, flush=True)
+        self.debug_log.appendPlainText(line)
+        self.debug_log.repaint()
+
+    def set_game_summary(self, summary: str) -> None:
+        self.last_game_summary = summary
+        self.game_summary_log.setPlainText(summary)
+        self.game_summary_log.repaint()
+
+    def debug_setting_changed(self, *_args) -> None:
+        enabled = self.debug_checkbox.isChecked()
+        self.debug_state_label.setVisible(enabled)
+        self.debug_log.setVisible(enabled)
+        if enabled:
+            self.debug_log.appendPlainText("[DEBUG ligado]")
+        else:
+            self.debug_log.clear()
+
+    def refresh_debug_state(self) -> None:
+        state = "ON" if self.predict_checkbox.isChecked() else "OFF"
+        self.debug_state_label.setText(
+            f"Capturas: {self.capture_count} | Predicts: {self.predict_count} | Predict: {state} | "
+            f"Timer: {self.timer.interval()} ms"
+        )
+
+    def capture_once(self, *_args, force: bool = False) -> None:
+        if not force and not self.preview_checkbox.isChecked() and not self.predict_checkbox.isChecked():
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("Preview desabilitado. Ative Preview ou Predict para monitorar.")
+            self.refresh_debug_state()
+            return
+
         hwnd = self.selected_hwnd()
         if hwnd is None:
             self.last_capture = None
             self.preview_label.setText("Nenhuma janela disponivel.")
             self.preview_label.setPixmap(QPixmap())
+            self.refresh_debug_state()
             return
 
         bounds = window_bounds(hwnd)
@@ -349,6 +443,8 @@ class MainWindow(QMainWindow):
             self.last_capture = None
             self.preview_label.setText("Nao foi possivel localizar a area desta janela.")
             self.preview_label.setPixmap(QPixmap())
+            self.log_debug(f"Captura falhou: bounds indisponiveis para HWND 0x{hwnd:08X}.")
+            self.refresh_debug_state()
             return
 
         monitor = clamp_to_monitor(bounds, self.screen_capture.monitors)
@@ -356,6 +452,8 @@ class MainWindow(QMainWindow):
             self.last_capture = None
             self.preview_label.setText("A janela selecionada esta fora dos monitores capturaveis.")
             self.preview_label.setPixmap(QPixmap())
+            self.log_debug(f"Captura falhou: HWND 0x{hwnd:08X} fora dos monitores.")
+            self.refresh_debug_state()
             return
 
         try:
@@ -367,7 +465,10 @@ class MainWindow(QMainWindow):
                 "Verifique se ela nao esta minimizada ou em fullscreen exclusivo."
             )
             self.preview_label.setPixmap(QPixmap())
-            self.statusBar().showMessage(f"Falha na captura: {type(error).__name__}")
+            message = f"Falha na captura: {type(error).__name__}: {error}"
+            self.log_debug(message)
+            self.statusBar().showMessage(message)
+            self.refresh_debug_state()
             return
 
         image = QImage(
@@ -377,33 +478,70 @@ class MainWindow(QMainWindow):
             screenshot.width * 4,
             QImage.Format.Format_RGB32,
         ).copy()
+        image = self.normalized_capture_image(image)
         self.last_capture = image
+        self.capture_count += 1
         display_image = self.predicted_image(image)
-        pixmap = QPixmap.fromImage(display_image)
-        scaled = pixmap.scaled(
-            self.preview_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.preview_label.setPixmap(scaled)
+        if self.preview_checkbox.isChecked():
+            pixmap = QPixmap.fromImage(display_image)
+            scaled = pixmap.scaled(
+                self.preview_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.preview_label.setPixmap(scaled)
+        else:
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("Preview desabilitado. Predict continua rodando em segundo plano.")
+
         if not self.predict_checkbox.isChecked():
             self.statusBar().showMessage(
-                f"Monitorando HWND 0x{hwnd:08X} a {1000 / self.refresh_interval_ms:.1f} Hz"
+                f"Monitorando HWND 0x{hwnd:08X} a {self.predict_fps_input.value():.1f} Hz | "
+                f"captura {CAPTURE_WIDTH}x{CAPTURE_HEIGHT}"
             )
+        self.refresh_debug_state()
 
     def refresh_timer_interval(self) -> None:
-        if self.predict_checkbox.isChecked():
-            interval = max(1, int(1000 / self.predict_fps_input.value()))
-        else:
-            interval = self.refresh_interval_ms
+        interval = max(1, int(1000 / self.predict_fps_input.value()))
         self.timer.setInterval(interval)
+        self.refresh_debug_state()
 
-    def predict_setting_changed(self) -> None:
+    def predict_setting_changed(self, *_args) -> None:
         if self.predict_checkbox.isChecked() and self.selected_model_path() is None:
             self.predict_checkbox.setChecked(False)
-            self.statusBar().showMessage("Nenhum modelo best.pt disponivel para predict.")
+            message = "Nenhum modelo best.pt disponivel para predict."
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText(message)
+            self.log_debug(message)
+            self.statusBar().showMessage(message)
             return
         self.refresh_timer_interval()
+        if self.predict_checkbox.isChecked():
+            self.predict_runtime_error = None
+            self.log_debug(
+                f"Predict ligado | modelo={self.model_combo.currentText()} | "
+                f"imgsz={PREDICT_IMAGE_SIZE} | conf={self.predict_conf_input.value():.2f}"
+            )
+            self.statusBar().showMessage(f"Predict ligado: {self.model_combo.currentText()}")
+            self.capture_once()
+        else:
+            self.log_debug("Predict desligado.")
+
+    def predict_parameter_changed(self, *_args) -> None:
+        self.predict_runtime_error = None
+        self.log_debug(f"Parametros alterados | conf={self.predict_conf_input.value():.2f}")
+        if self.predict_checkbox.isChecked():
+            self.capture_once()
+
+    def preview_setting_changed(self, *_args) -> None:
+        if self.preview_checkbox.isChecked():
+            self.log_debug("Preview ligado.")
+            self.capture_once()
+        else:
+            self.log_debug("Preview desligado.")
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("Preview desabilitado. Ative novamente para ver a janela.")
+        self.refresh_debug_state()
 
     def refresh_model_list(self) -> None:
         current_path = self.selected_model_path()
@@ -421,22 +559,11 @@ class MainWindow(QMainWindow):
             index = self.model_combo.findData(str(current_path))
             if index >= 0:
                 self.model_combo.setCurrentIndex(index)
+        elif paths:
+            self.model_combo.setCurrentIndex(0)
 
         self.model_combo.blockSignals(False)
         self.unload_prediction_model()
-
-    def refresh_model_list_from_button(self) -> None:
-        self.refresh_model_list()
-        model_count = self.model_combo.count()
-        if self.selected_model_path() is None:
-            self.statusBar().showMessage("Nenhum best.pt encontrado em runs/detect.")
-            return
-
-        self.model_combo.setCurrentIndex(0)
-        self.unload_prediction_model()
-        self.statusBar().showMessage(
-            f"{model_count} modelos encontrados. Selecionado mais recente: {self.model_combo.currentText()}"
-        )
 
     def available_model_paths(self) -> list[Path]:
         if not RUNS_DIR.exists():
@@ -447,13 +574,41 @@ class MainWindow(QMainWindow):
         data = self.model_combo.currentData()
         return Path(data) if data else None
 
-    def unload_prediction_model(self) -> None:
+    def unload_prediction_model(self, *_args) -> None:
         self.prediction_model = None
         self.prediction_model_path = None
+        self.predict_runtime_error = None
+        if hasattr(self, "debug_log"):
+            self.log_debug(f"Modelo selecionado: {self.model_combo.currentText()}")
+
+    def normalized_capture_image(self, image: QImage) -> QImage:
+        if image.width() == CAPTURE_WIDTH and image.height() == CAPTURE_HEIGHT:
+            return image
+
+        scaled = image.scaled(
+            CAPTURE_WIDTH,
+            CAPTURE_HEIGHT,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        left = max(0, (scaled.width() - CAPTURE_WIDTH) // 2)
+        top = max(0, (scaled.height() - CAPTURE_HEIGHT) // 2)
+        return scaled.copy(left, top, CAPTURE_WIDTH, CAPTURE_HEIGHT)
+
+    def prediction_device(self) -> str:
+        try:
+            import torch
+
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                return "0"
+        except Exception as error:
+            self.log_debug(f"Nao foi possivel consultar CUDA: {type(error).__name__}: {error}")
+        return "cpu"
 
     def load_prediction_model(self):
         model_path = self.selected_model_path()
         if model_path is None:
+            self.log_debug("Load cancelado: nenhum modelo selecionado.")
             return None
         if self.prediction_model is not None and self.prediction_model_path == model_path:
             return self.prediction_model
@@ -461,51 +616,118 @@ class MainWindow(QMainWindow):
         try:
             from ultralytics import YOLO
 
+            started_at = time.perf_counter()
+            self.log_debug(f"Carregando modelo: {model_path}")
             self.prediction_model = YOLO(str(model_path))
             self.prediction_model_path = model_path
-            self.statusBar().showMessage(f"Modelo carregado: {model_path.name}")
+            elapsed_ms = (time.perf_counter() - started_at) * 1000
+            class_count = len(getattr(self.prediction_model, "names", {}) or {})
+            message = f"Modelo carregado: {model_path.name} | {class_count} classes | {elapsed_ms:.0f} ms"
+            self.log_debug(message)
+            self.statusBar().showMessage(message)
             return self.prediction_model
         except Exception as error:
             self.prediction_model = None
             self.prediction_model_path = None
-            self.predict_checkbox.setChecked(False)
-            self.statusBar().showMessage(f"Falha ao carregar modelo: {type(error).__name__}")
+            message = f"Falha ao carregar modelo: {type(error).__name__}: {error}"
+            self.predict_runtime_error = message
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText(message)
+            self.log_debug(message)
+            self.statusBar().showMessage(message)
             return None
 
     def predicted_image(self, image: QImage) -> QImage:
         if not self.predict_checkbox.isChecked():
             return image
 
+        if self.predict_runtime_error:
+            return image
+
+        return self.run_prediction(image, source="timer")
+
+    def predict_once_clicked(self) -> None:
+        self.log_debug("Predict 1x solicitado.")
+        if self.last_capture is None:
+            self.capture_once(force=True)
+
+        if self.last_capture is None:
+            message = "Predict 1x cancelado: nenhum frame capturado."
+            self.log_debug(message)
+            self.statusBar().showMessage(message)
+            return
+
+        self.predict_runtime_error = None
+        output = self.run_prediction(self.last_capture, source="manual")
+        if self.preview_checkbox.isChecked():
+            pixmap = QPixmap.fromImage(output)
+            scaled = pixmap.scaled(
+                self.preview_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.preview_label.setPixmap(scaled)
+        else:
+            self.preview_label.setPixmap(QPixmap.fromImage(output).scaled(
+                self.preview_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        self.refresh_debug_state()
+
+    def run_prediction(self, image: QImage, source: str) -> QImage:
         model = self.load_prediction_model()
         if model is None:
             return image
 
         try:
             started_at = time.perf_counter()
+            device = self.prediction_device()
+            self.log_debug(
+                f"Predict start ({source}) | frame={image.width()}x{image.height()} | "
+                f"imgsz={PREDICT_IMAGE_SIZE} | conf={self.predict_conf_input.value():.2f} | device={device}"
+            )
             result = model.predict(
                 source=self.qimage_to_rgb_array(image),
-                imgsz=self.predict_imgsz_input.value(),
+                imgsz=PREDICT_IMAGE_SIZE,
                 conf=self.predict_conf_input.value(),
-                device=0,
+                device=device,
                 verbose=False,
             )[0]
             elapsed_ms = (time.perf_counter() - started_at) * 1000
         except Exception as error:
-            self.statusBar().showMessage(f"Falha no predict: {type(error).__name__}")
+            message = f"Falha no predict: {type(error).__name__}: {error}"
+            self.predict_runtime_error = message
+            self.log_debug(message)
+            self.statusBar().showMessage(message)
+            if self.preview_checkbox.isChecked():
+                self.preview_label.setText(message)
             return image
 
+        detections = detections_from_yolo_result(result)
+        state = GameAnalyzer(CAPTURE_WIDTH, CAPTURE_HEIGHT).analyze(detections)
+        self.update_game_state(state)
         output = image.copy()
-        self.draw_predictions(output, result)
+        self.draw_predictions(output, result, state)
+        self.predict_count += 1
+        self.log_debug(f"Predict ok ({source}) | {len(result.boxes)} deteccoes | {elapsed_ms:.0f} ms")
         self.statusBar().showMessage(
             f"Predict: {len(result.boxes)} deteccoes | {elapsed_ms:.0f} ms | "
-            f"conf {self.predict_conf_input.value():.2f} | imgsz {self.predict_imgsz_input.value()}"
+            f"conf {self.predict_conf_input.value():.2f} | imgsz {PREDICT_IMAGE_SIZE}"
         )
 
         if self.pause_after_predict_checkbox.isChecked():
             self.predict_checkbox.setChecked(False)
             self.pause_after_predict_checkbox.setChecked(False)
+            self.statusBar().showMessage(
+                f"Predict pausado apos 1 frame: {len(result.boxes)} deteccoes | {elapsed_ms:.0f} ms"
+            )
 
         return output
+
+    def update_game_state(self, state: HandState) -> None:
+        self.set_game_summary(state.summary())
+        self.log_debug(f"Estado de jogo: {state.summary()}")
 
     def qimage_to_rgb_array(self, image: QImage):
         import numpy as np
@@ -518,7 +740,7 @@ class MainWindow(QMainWindow):
         array = np.frombuffer(ptr, dtype=np.uint8).reshape((height, rgb.bytesPerLine()))
         return array[:, : width * 3].reshape((height, width, 3)).copy()
 
-    def draw_predictions(self, image: QImage, result) -> None:
+    def draw_predictions(self, image: QImage, result, state: HandState | None = None) -> None:
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -529,12 +751,24 @@ class MainWindow(QMainWindow):
             x1, y1, x2, y2 = [float(value) for value in box.xyxy[0]]
             class_id = int(box.cls[0])
             confidence = float(box.conf[0])
-            label = f"{names.get(class_id, class_id)} {confidence:.2f}"
-            detections.append((x1, y1, x2, y2, label))
+            name = str(names.get(class_id, class_id))
+            label = f"{name} {confidence:.2f}"
+            detections.append((x1, y1, x2, y2, label, name))
 
         label_rects: list[QRectF] = []
-        for x1, y1, x2, y2, label in detections:
-            painter.setPen(QPen(QColor("#22C55E"), 3))
+        discard_counts = Counter(tile.base_key for tile in state.discard_candidates) if state is not None else Counter()
+        for x1, y1, x2, y2, label, name in detections:
+            tile = tile_from_name(name)
+            is_player_tile = ((y1 + y2) / 2) >= CAPTURE_HEIGHT * 0.64
+            is_discard_candidate = bool(tile and is_player_tile and discard_counts[tile.base_key] > 0)
+            if is_discard_candidate:
+                discard_counts[tile.base_key] -= 1
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(239, 68, 68, 95))
+                painter.drawRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor("#EF4444" if is_discard_candidate else "#22C55E"), 2))
             painter.drawRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
 
             label_rect = self.prediction_label_rect(
@@ -551,16 +785,14 @@ class MainWindow(QMainWindow):
             label_anchor_x = label_rect.center().x()
             label_anchor_y = label_rect.center().y()
 
-            painter.setPen(QPen(QColor("#FBBF24"), 2))
+            painter.setPen(QPen(QColor("#FBBF24"), 1))
             painter.drawLine(
                 int(label_anchor_x),
                 int(label_anchor_y),
                 int(box_center_x),
                 int(box_center_y),
             )
-            painter.setPen(QPen(QColor("#111827"), 1))
-            painter.setBrush(QColor(17, 24, 39, 225))
-            painter.drawRoundedRect(label_rect, 4, 4)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QColor("#FFFFFF"))
             painter.drawText(
                 label_rect.adjusted(6, 0, -6, 0),
@@ -609,8 +841,7 @@ class MainWindow(QMainWindow):
         return QRectF(x, y, rect.width(), rect.height())
 
     def save_screenshot(self) -> None:
-        if self.last_capture is None:
-            self.capture_once()
+        self.capture_once(force=True)
 
         if self.last_capture is None:
             self.statusBar().showMessage("Nenhum frame disponivel para salvar.")
