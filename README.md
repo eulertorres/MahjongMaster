@@ -18,7 +18,7 @@ A preview atualiza em 3 Hz. Use **Salvar screenshot** ou pressione **F3** para s
 
 ## Comecando com YOLO
 
-A estrategia inicial e treinar um detector unico com 37 classes:
+A estrategia inicial e treinar um detector unico com 38 classes:
 
 - `man_1` a `man_9`
 - `pin_1` a `pin_9`
@@ -26,6 +26,7 @@ A estrategia inicial e treinar um detector unico com 37 classes:
 - `wind_east`, `wind_south`, `wind_west`, `wind_north`
 - `dragon_white`, `dragon_green`, `dragon_red`
 - `man_5_red`, `pin_5_red`, `sou_5_red`
+- `tile_back` para pecas viradas/laranjas
 
 ### 1. Coletar screenshots
 
@@ -48,11 +49,11 @@ No anotador:
 - selecione uma screenshot na lista
 - escolha a classe ativa pelos botoes ou combo
 - arraste na imagem para desenhar uma box em cada peca visivel
-- escolha `train` ou `val`
+- escolha `train`, `val` ou `test`
 - clique em **Salvar**
 
-Na lista de screenshots, nomes verdes ja foram salvos em `train` e nomes azuis ja foram salvos em `val`.
-O painel **Pecas no treino** mostra quantas anotacoes de cada classe existem em `dataset/labels/train`.
+Na lista de screenshots, nomes verdes ja foram salvos em `train`, nomes azuis em `val` e nomes roxos em `test`.
+O painel **Pecas catalogadas** mostra quantas imagens/anotacoes existem em cada split, a porcentagem atual e a divisao recomendada de `80% train`, `15% val` e `5% test`.
 
 O proprio app organiza os arquivos assim:
 
@@ -74,6 +75,7 @@ Atalhos:
 A / S / D / F: troca para man, pin, sou ou honras
 Q / W / E / T: East, South, West, North
 Y / U / I: White, Green, Red
+V: peca virada/laranja
 1-9: seleciona o numero do naipe ativo
 R: seleciona o 5 vermelho do naipe ativo
 Z / X: imagem anterior ou proxima
@@ -96,7 +98,7 @@ data/mahjong_soul.yaml
 
 Pela interface, clique em **Abrir treino**. A janela de treino permite configurar modelo, epocas, tamanho da imagem, batch e device.
 Use **Nome do treino** para escolher a pasta salva em `runs/detect`.
-Se vazio, o nome e gerado como `800e_yolo11n_1592p_5b`; se ja existir, usa `_V2`, `_V3` e assim por diante.
+Se vazio, o nome e gerado como `800e_yolo11n_1600p_5b`; se ja existir, usa `_V2`, `_V3` e assim por diante.
 O nome automatico acompanha mudancas em epocas, modelo base e resolucao. O campo **Modelo base** e um dropdown editavel com modelos YOLO comuns.
 No dropdown, `n/s/m/l/x` indicam modelos cada vez mais pesados: nano, small, medium, large e xlarge.
 Use **Patience** para controlar o EarlyStopping; `0` desativa a parada antecipada.
@@ -115,7 +117,7 @@ pip install -r requirements-train.txt
 Tambem e possivel treinar pelo terminal:
 
 ```powershell
-python scripts/train_yolo.py --model yolo11n.pt --epochs 100 --imgsz 1280 --batch 8
+python scripts/train_yolo.py --model yolo11n.pt --epochs 100 --imgsz 1600 --batch 8
 ```
 
 Os resultados ficam em:
@@ -129,7 +131,7 @@ runs/detect/mahjong_soul_tiles
 Use o `best.pt` do treino escolhido:
 
 ```powershell
-python scripts/predict_yolo.py --weights runs/detect/mahjong_soul_tiles/weights/best.pt --source dataset/raw --imgsz 960 --conf 0.25 --device 0
+python scripts/predict_yolo.py --weights runs/detect/mahjong_soul_tiles/weights/best.pt --source dataset/raw --imgsz 1600 --conf 0.25 --device 0
 ```
 
 As imagens com as deteccoes desenhadas ficam em:

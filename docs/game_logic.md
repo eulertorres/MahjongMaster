@@ -14,25 +14,43 @@ O fluxo atual e:
 4. `mahjong_logic.py` converte nomes de classes em pecas, grupos e yakus provaveis.
 5. A UI mostra um resumo abaixo da preview. Esse painel ocupa uma parte grande da janela para caber a analise.
 
+As regioes de tela usadas pela leitura ficam em `configs.json`, em coordenadas da captura normalizada `1592x933`. A janela principal tem o botao `Areas`, que abre um editor visual: arraste a area para mover e puxe o canto inferior direito para redimensionar. Os campos numericos continuam disponiveis para ajuste fino. O checkbox `Areas` liga/desliga o overlay desenhado na preview.
+
+As regioes `Oponente esquerda/frente/direita` representam mao aberta/chamadas laterais dos oponentes. Os descartes ficam em regioes separadas: `Descartes jogador`, `Descartes esquerda`, `Descartes frente` e `Descartes direita`. Somente essas regioes de descarte alimentam a lista de pecas ja vistas para reduzir probabilidades de yakus dependentes de pecas que sairam.
+
 Exemplo de saida:
 
 ```text
-Hand: 1-man | 2-man | 3-sou | 4-pin | 5-pin | 6-pin | CHI 1-pin,2-pin,3-pin | KAN 4-sou 4x | Yaku provavel: All Simples
+[MAO] Fechada:
+  1-man | 2-man | 3-sou | 4-pin | 5-pin | 6-pin
+[MAO] Abertas:
+  CHI 1-pin,2-pin,3-pin | KAN 4-sou 4x
+[YAKU] Provaveis/ativos:
+  All Simples 76% | Half Flush 61%
+[DESCARTE] Melhor descarte agora:
+  9-man | east-wind
+  Motivo: menor contribuicao estimada entre as pecas conhecidas
+[FALTAM] Pecas que mais ajudam:
+  3-pin 52% (All Simples) | 6-pin 45% (Pure Straight)
+[INFO] Pecas conhecidas: 13/13
 ```
 
 Quando faltam pecas detectadas, a UI preenche com `???` e avisa que a quantidade ainda nao e suficiente para uma decisao confiavel:
 
 ```text
-Hand: 6-man | 9-man | 1-pin | ... | ???
-Yaku provavel: All Simples 58%
-Analise incompleta: faltam 1 peca(s); numero de pecas insuficiente para decisao confiavel.
-Descartes que nao contribuem: 9-man | 1-pin | 1-sou
+[MAO] Fechada:
+  6-man | 9-man | 1-pin | ... | ???
+[INFO] Pecas conhecidas: 12/13; analise incompleta: faltam 1 peca(s), decisao ainda pode oscilar.
 ```
 
-A UI tambem mostra os descartes visiveis no centro da mesa quando eles sao detectados:
+A UI tambem mostra os descartes visiveis no centro da mesa quando eles sao detectados. Eles agora sao separados por posicao estimada na mesa:
 
 ```text
-Descartes vistos: east-wind | 7-pin | red-dragon
+[DESCARTES VISTOS]
+Principal: 8-sou | west-wind
+Esquerda: 5-man | 2-pin
+Cima: green-dragon
+Direita: red-dragon | 1-pin
 ```
 
 Os logs tecnicos antigos continuam existindo, mas so aparecem quando o checkbox `DEBUG` esta ligado.
@@ -51,12 +69,14 @@ Contem as estruturas puras de dominio:
 
 Tambem contem funcoes auxiliares:
 
-- `tile_from_name(name)`: transforma uma classe YOLO em `Tile`.
+- `tile_from_name(name)`: transforma uma classe YOLO em `Tile`; classes visuais como `tile_back` retornam `None` e nao entram na mao.
 - `sort_tiles(tiles)`: ordena pecas por naipe e numero.
 - `classify_meld(tiles)`: tenta classificar um grupo como `CHI`, `PON` ou `KAN`.
 - `likely_yaku(state)`: roda os matchers disponiveis sobre o estado da mao.
 
 Quando nenhum yaku esta confirmado, a camada gera uma estimativa de compatibilidade em porcentagem para planos simples, como `All Simples`, `Half Outside Hand`, `Half Flush`, `Full Flush`, `Pure Straight`, `Seven Pairs` e yakuhai de dragoes. Essa porcentagem e um score heuristico, nao uma probabilidade matematica real.
+
+Quando um descarte deixaria a mao em tenpai, a logica tambem calcula as esperas resultantes. Se alguma espera ja aparece nos descartes do proprio jogador, o descarte recebe penalidade de furiten e tende a ser evitado, salvo quando ele ainda for claramente o melhor avanco de shanten.
 
 ### `game_analyzer.py`
 
@@ -74,7 +94,7 @@ A primeira heuristica e conservadora e focada apenas no jogador local.
 
 1. Filtra pecas na parte inferior da imagem.
 
-   A captura padrao e normalizada para `1592x933`. O analisador considera como candidatas as pecas cujo centro esta abaixo de cerca de `64%` da altura da imagem.
+   A captura padrao e normalizada para `1592x933`. O analisador usa a regiao configuravel `player_hand` do `configs.json`. Se essa regiao estiver ausente/desativada, volta para a heuristica antiga de considerar pecas abaixo de cerca de `64%` da altura da imagem.
 
 2. Procura a linha inferior mais densa.
 
@@ -90,7 +110,9 @@ A primeira heuristica e conservadora e focada apenas no jogador local.
 
 5. Grupos separados viram chamadas abertas.
 
-   Apenas grupos separados no lado direito, com 3 ou 4 pecas, viram chamadas abertas se a separacao ainda deixar uma quantidade plausivel de pecas na mao fechada:
+   A leitura tambem observa tamanho e posicao. Pecas em grupos plausiveis de 3/4 que aparecem separadas, mais altas, menores ou deslocadas para a direita da linha principal entram como chamadas abertas. Essas pecas entram em `open_melds`, nao em `hand_tiles`, portanto nunca podem aparecer como melhor descarte.
+
+   Apenas grupos separados, com 3 ou 4 pecas, viram chamadas abertas se a separacao ainda deixar uma quantidade plausivel de pecas na mao fechada:
 
    - 3 iguais: `PON`
    - 4 iguais: `KAN`
@@ -112,19 +134,95 @@ A primeira heuristica e conservadora e focada apenas no jogador local.
 
 7. Mapeia descartes no centro da mesa.
 
-   O analisador tambem olha a regiao central da mesa para montar uma lista simples de `discarded_tiles`. Essa lista ainda e uma heuristica visual, mas ja ajuda a baixar ou eliminar planos que dependem de pecas que claramente ja sairam.
+   O analisador tambem olha a regiao central da mesa para montar `discarded_tiles` e `discarded_by_player`. A separacao e feita por quadrantes/posicao relativa ao centro da mesa:
 
-8. Escolhe os tres planos/yakus mais provaveis.
+   - `principal`: descartes na parte de baixo da mesa.
+   - `esquerda`: descartes do jogador a esquerda.
+   - `cima`: descartes do jogador de cima.
+   - `direita`: descartes do jogador a direita.
 
-   A logica agora considera que varios yakus podem ser perseguidos ao mesmo tempo. Quando nao ha yaku confirmado por decomposicao, ela monta candidatos como `All Simples`, ventos, dragoes, flush, straight e pares. Os tres melhores aparecem na UI com score de compatibilidade.
+   Essa lista ainda e uma heuristica visual, mas ja ajuda a baixar ou eliminar planos que dependem de pecas que claramente ja sairam.
 
-9. Descarta candidatos ruins considerando os tres planos.
+8. Escolhe os planos/yakus mais provaveis.
 
-   Quando o yaku mais provavel e estimado, a logica calcula quais pecas conhecidas nao contribuem para nenhum dos tres melhores planos. A UI pinta essas pecas em vermelho translucido no overlay.
+   A logica agora considera que varios yakus podem ser perseguidos ao mesmo tempo. Quando nao ha yaku confirmado por decomposicao, ela monta candidatos como `All Simples`, ventos, dragoes, flush, straight e pares. Normalmente os tres melhores aparecem na UI com score de compatibilidade.
+
+   Se algum yaku ja estiver em `100%`, ele continua aparecendo, mas a UI tambem mostra planos extras para orientar como fechar a mao. Exemplo: com um yaku completo, aparecem esse yaku e mais tres planos; com tres yakus completos, aparecem esses tres e mais tres planos seguintes.
+
+9. Zera yakus impossiveis.
+
+   Antes de um yaku entrar no Top 3, ele passa por uma camada de bloqueio. Se uma chamada aberta torna aquele yaku impossivel, o score vira `0%`, ele aparece em `[YAKU] Bloqueados` e deixa de influenciar descarte ou pecas faltantes.
+
+   Exemplos:
+
+   - Mao aberta bloqueia yakus `Menzenchin Only`, como `Riichi`, `Pinfu`, `Seven Pairs`, `Nine Gates` e similares.
+   - Uma chamada aberta com terminal ou honra bloqueia `All Simples`.
+   - Uma chamada aberta `456` bloqueia `Half Outside Hand`, `Fully Outside Hand`, `All Triplets`, `All Terminals and Honors` e outros yakus incompativeis.
+   - Chamadas abertas misturando naipes bloqueiam `Half Flush` e `Full Flush`.
+   - Chamadas abertas com pecas nao-verdes bloqueiam `All Green`.
+
+   Pecas soltas na mao fechada nao bloqueiam automaticamente um yaku, porque ainda podem ser descartadas. O bloqueio forte e aplicado principalmente ao que ja ficou permanente: chamadas abertas.
+
+10. Descarta candidatos ruins considerando os planos ativos.
+
+   Quando o yaku mais provavel e estimado, a logica calcula quais pecas conhecidas nao contribuem para nenhum dos planos ativos. A UI pinta a pior peca em vermelho e outras pecas ruins em amarelo. Assim o descarte mais recomendado fica evidente, sem esconder alternativas ruins.
 
    Quando um yaku ja esta confirmado, a UI ainda calcula eficiencia para fechar a mao. Nesse caso, os red-labels marcam pecas isoladas/fracas que atrapalham completar quatro grupos e um par, sem remover o yaku ja formado. Por exemplo, um trio de `White Dragon` continua sendo yaku confirmado, mas uma honra solta ou um numero isolado pode ser marcado como descarte ruim.
 
-   Exemplo: se a mao tem dois `east-wind` e nenhum `east-wind` foi descartado, os planos de `Seat Wind` e `Prevalent Wind` continuam vivos e esses dois ventos nao sao marcados em vermelho. Se varios `east-wind` ja apareceram nos descartes, esses planos perdem confianca ou deixam de ser considerados.
+   Exemplo: se a mao tem dois `east-wind` e nenhum `east-wind` foi descartado, o plano de `Prevalent Wind` continua vivo porque `East` e tratado como vento fixo da mesa. Para os ventos dos jogadores, a UI tenta detectar o marcador vermelho de East nas regioes centrais `wind_letter_player`, `wind_letter_left`, `wind_letter_top` e `wind_letter_right`; depois infere os demais pela ordem de turno `esquerda -> principal -> direita -> cima`.
+
+11. Estima pecas que mais ajudam.
+
+   Cada plano provavel tambem informa quais pecas ainda poderiam melhorar aquele plano. A UI combina os tres melhores planos, reduz o peso de pecas que ja apareceram nos descartes e mostra uma lista em `[FALTAM]`.
+
+12. Detecta turno, leste e botoes por pixel configuravel.
+
+   Chii, Pon, Kan, Riichi, Ron, Tsumo, Skip, setas de turno e marcador de leste nao sao mais areas retangulares. No editor `Areas`, a secao `Pixel` permite escolher um seletor, clicar na imagem congelada e salvar a posicao, a cor exata e uma tolerancia. Em runtime, se aquele pixel estiver com cor parecida, a variavel correspondente fica ativa.
+
+   Para botoes existem dois seletores por acao, porque o Mahjong Soul pode deslocar os botoes quando aparecem varias opcoes. O ponto ativo tambem e usado como destino de clique quando a decisao for `SIM`. Quando o botao aparece, o preview marca o ponto e o resumo mostra:
+
+   ```text
+   [CHAMADAS]
+     Chii: botao visivel; descarte esquerda 2-sou; opcoes 2-sou com 3-sou+4-sou => 2-3-4-sou
+   ```
+
+   A regra considera apenas o descarte estimado do jogador a esquerda, porque no Mahjong japones/Riichi so e possivel chamar `Chii` do jogador anterior.
+
+   Para descobrir de quem veio a peca, a UI consulta os seletores `turn_left`, `turn_top`, `turn_right` e `turn_player`. Com isso o resumo pode mostrar:
+
+   ```text
+   [CHAMADAS]
+     Pon: botao visivel; origem esquerda; peca green-dragon; opcoes green-dragon de esquerda com green-dragon+green-dragon
+   ```
+
+   Se a seta amarela nao for detectada com confianca, a logica nao tenta adivinhar a peca da chamada. Quando ha seta, apenas a area de descarte daquele jogador e considerada. A peca pegavel e escolhida assim:
+
+   - esquerda: peca mais baixa da fileira/coluna mais a esquerda;
+   - direita: peca mais alta da fileira/coluna mais a direita;
+   - frente: peca mais a esquerda da fileira mais alta;
+   - jogador: peca mais a direita da fileira mais baixa.
+
+   A UI tambem simula `Chii`, `Pon` e `Kan` quando aparecem opcoes validas. A decisao compara os planos/yakus antes e depois da chamada e marca `SIM` quando a chamada mantem ou melhora os planos ativos; marca `NAO` quando abrir a mao derruba yakus importantes ou reduz demais a compatibilidade.
+
+13. Sempre sugere um descarte.
+
+   Mesmo quando todas as pecas contribuem para algum plano, a UI calcula uma sugestao de descarte por eficiencia. A ordem de prioridade e:
+
+   - primeiro, pecas que nao ajudam os tres melhores yakus;
+   - depois, pecas isoladas ou pouco conectadas;
+   - por fim, a peca de menor contribuicao estimada entre as detectadas.
+
+   A ordenacao tambem roda uma simulacao leve de futuro: remove cada candidata, recalcula os principais planos de yaku e penaliza descartes que deixam a mao com planos melhores. Dora real e red five sao protegidos quando existe uma alternativa nao-dora.
+
+14. Calcula dora a partir do indicador.
+
+   A regiao `dora_indicators` detecta a peca indicadora, mas a UI mostra a dora real em `[INFO]`. A regra segue o Riichi:
+
+   - `1` a `8` indicam o numero seguinte; `9` volta para `1`.
+   - `east -> south -> west -> north -> east`.
+   - `white -> green -> red -> white`.
+
+   Exemplo: se o indicador e `3-sou`, a dora mostrada e `4-sou`.
 
 ## Formato das pecas
 
@@ -136,6 +234,7 @@ pin_9
 sou_5_red
 wind_east
 dragon_green
+tile_back
 ```
 
 Na UI, elas aparecem de forma compacta:
@@ -160,7 +259,8 @@ Regra ativa nesta primeira versao:
 - `Pinfu`: exige decomposicao fechada com quatro sequencias e par sem honra.
 - `Pure Double Sequence`: exige decomposicao fechada com duas sequencias identicas.
 - `Twice Pure Double Sequence`: exige duas duplas de sequencias identicas.
-- `Seat Wind` / `Prevalent Wind`: aproximacao por trio de qualquer vento. Ainda nao diferencia vento do jogador e vento da rodada.
+- `Seat Wind`: aproximacao por trio de vento enquanto o vento do jogador ainda nao e lido.
+- `Prevalent Wind`: trio de `east-wind`; nesta versao `East` e considerado o vento fixo da mesa.
 - `Dragons`, `White Dragon`, `Green Dragon`, `Red Dragon`: trio de dragoes.
 - `After a Kan` / situacionais similares: cadastrados, mas dependem de eventos que ainda nao monitoramos.
 - `All Triplets`: exige decomposicao em quatro trios/quads e um par.
@@ -199,7 +299,11 @@ Esta etapa e so a base. Ainda ha limitacoes importantes:
 
 - Nao sabemos ainda qual e o vento da rodada nem o vento do jogador.
 - Nao distinguimos eventos como riichi, tsumo, ron, ippatsu, rinshan, haitei ou houtei.
-- Nao lemos descartes, dora indicators, wall, turno ou botao de chamada.
+- Descartes ja sao lidos por regiao visual, mas ainda nao ha garantia absoluta da ordem real em todos os layouts.
+- Ainda nao lemos dora indicators, wall, turno ou botoes de chamada alem do Chii.
+- Os botoes Chii e Pon ja tem deteccao por cor, mas Kan/Ron/Riichi ainda nao.
+- A ordem exata de "ultimo descarte" por jogador ainda e aproximada por posicao visual.
+- As regioes de oponentes, dora, Kan e Riichi ja aparecem no overlay e sao configuraveis, mas ainda serao conectadas a regras especificas nas proximas etapas.
 - As chamadas abertas sao inferidas por espaco horizontal, nao por uma leitura semantica da UI.
 - Se o YOLO errar classe/caixa, a logica de jogo herda esse erro.
 - Maos laterais, topo e centro sao ignorados nesta primeira versao.

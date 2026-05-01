@@ -5,11 +5,13 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from PyQt6.QtCore import QPointF, QProcess, QRectF, Qt, QTimer
 from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -18,6 +20,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QPlainTextEdit,
     QScrollArea,
@@ -37,7 +40,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = PROJECT_ROOT / "runs" / "detect"
 TRAIN_SCRIPT = PROJECT_ROOT / "scripts" / "train_yolo.py"
 DATA_YAML = PROJECT_ROOT / "data" / "mahjong_soul.yaml"
+COLAB_DATASET_ZIP_NAME = "mahjongmaster_colab_dataset.zip"
+COLAB_DATASET_ZIP = PROJECT_ROOT / COLAB_DATASET_ZIP_NAME
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+PACKAGE_EXTENSIONS = {".yaml", ".yml", ".png", ".jpg", ".jpeg", ".txt"}
 RUN_COLORS = [
     "#2563EB",
     "#DC2626",
@@ -78,6 +84,32 @@ def read_results_rows(run_dir: Path) -> list[dict[str, str]]:
             return list(csv.DictReader(file))
     except OSError:
         return []
+
+
+def package_file_allowed(path: Path) -> bool:
+    return path.suffix.lower() in PACKAGE_EXTENSIONS and "raw" not in path.parts
+
+
+def add_package_tree(zip_file: ZipFile, directory: Path) -> int:
+    if not directory.exists():
+        return 0
+
+    count = 0
+    for path in directory.rglob("*"):
+        if not path.is_file() or not package_file_allowed(path):
+            continue
+        zip_file.write(path, path.relative_to(PROJECT_ROOT))
+        count += 1
+    return count
+
+
+def create_dataset_zip(output_path: Path = COLAB_DATASET_ZIP) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(output_path, "w", ZIP_DEFLATED) as zip_file:
+        file_count = 0
+        file_count += add_package_tree(zip_file, PROJECT_ROOT / "data")
+        file_count += add_package_tree(zip_file, PROJECT_ROOT / "dataset")
+    return file_count
 
 
 def loss_train_series(rows: list[dict[str, str]]):
@@ -656,7 +688,7 @@ class TrainingWindow(QMainWindow):
         self.run_name_is_manual = False
 
         self.run_name_input = QLineEdit()
-        self.run_name_input.setPlaceholderText("Automatico: 800e_yolo11n_1592p")
+        self.run_name_input.setPlaceholderText("Automatico: 800e_yolo11n_1600p")
         self.run_name_input.textEdited.connect(self.mark_run_name_manual)
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
@@ -671,7 +703,7 @@ class TrainingWindow(QMainWindow):
         self.imgsz_input = QSpinBox()
         self.imgsz_input.setRange(320, 2048)
         self.imgsz_input.setSingleStep(32)
-        self.imgsz_input.setValue(1592)
+        self.imgsz_input.setValue(1600)
         self.imgsz_input.valueChanged.connect(self.update_auto_run_name)
         self.batch_input = QSpinBox()
         self.batch_input.setRange(1, 128)
@@ -688,21 +720,18 @@ class TrainingWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_training)
         self.summary_button = QPushButton("Resumo dos treinos")
         self.summary_button.clicked.connect(self.open_summary)
+        self.colab_zip_button = QPushButton("Criar dataset Colab")
+        self.colab_zip_button.clicked.connect(self.create_colab_dataset_zip)
         self.summary_window: TrainingSummaryWindow | None = None
 
         self.status_label = QLabel(self.dataset_summary())
         self.status_label.setWordWrap(True)
         self.speed_label = QLabel("Velocidade: aguardando treino")
         self.speed_label.setWordWrap(True)
-        self.options_help = QLabel(self.training_options_help())
-        self.options_help.setWordWrap(True)
-        self.metric_help = QLabel()
-        self.metric_help.setWordWrap(True)
-        self.result_help = QLabel(
-            "Resultado: use weights/best.pt para testar e integrar. "
-            "weights/last.pt e apenas a ultima epoca."
-        )
-        self.result_help.setWordWrap(True)
+        self.help_button = QPushButton("?")
+        self.help_button.setFixedWidth(32)
+        self.help_button.setToolTip("Ajuda das opcoes e metricas do treino")
+        self.help_button.clicked.connect(self.show_training_help)
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
 
@@ -723,15 +752,14 @@ class TrainingWindow(QMainWindow):
         controls.addWidget(self.start_button)
         controls.addWidget(self.stop_button)
         controls.addWidget(self.summary_button)
+        controls.addWidget(self.colab_zip_button)
+        controls.addWidget(self.help_button)
 
         left = QVBoxLayout()
         left.addLayout(form)
         left.addLayout(controls)
         left.addWidget(self.status_label)
         left.addWidget(self.speed_label)
-        left.addWidget(self.build_help_group("Opcoes do treino", self.options_help))
-        left.addWidget(self.build_help_group("Metricas", self.metric_help))
-        left.addWidget(self.build_help_group("Modelo final", self.result_help))
         left.addWidget(QLabel("Log"))
         left.addWidget(self.log_output, stretch=1)
 
@@ -756,10 +784,6 @@ class TrainingWindow(QMainWindow):
         self.poll_timer.setInterval(1000)
         self.poll_timer.timeout.connect(self.refresh_plot)
 
-        self.metric_help.setText(
-            "Losses: menor e melhor. Metricas: maior e melhor. "
-            "best.pt e escolhido pela melhor validacao, nao pela ultima epoca."
-        )
         self.update_auto_run_name()
         self.refresh_plot()
 
@@ -785,9 +809,20 @@ class TrainingWindow(QMainWindow):
         group.setLayout(layout)
         return group
 
+    def show_training_help(self) -> None:
+        message = (
+            f"{self.training_options_help()}\n\n"
+            "Metricas:\n"
+            "Losses: menor e melhor. Metricas: maior e melhor.\n"
+            "best.pt e escolhido pela melhor validacao, nao pela ultima epoca.\n\n"
+            "Modelo final:\n"
+            "Use weights/best.pt para testar e integrar. weights/last.pt e apenas a ultima epoca."
+        )
+        QMessageBox.information(self, "Ajuda do treino", message)
+
     def training_options_help(self) -> str:
         return (
-            "Modelo base: checkpoint inicial; yolo11n e rapido, yolo11s tende a ser mais preciso.\n"
+            "Modelo base: checkpoint inicial; YOLO e rapido; RT-DETR tende a ser mais pesado/preciso.\n"
             "Epocas: voltas completas pelo dataset. Muitas epocas podem decorar se houver poucas imagens.\n"
             "Imagem: tamanho usado no treino; maior ajuda pecas pequenas e consome mais VRAM.\n"
             "Batch: imagens por passo; maior usa mais VRAM e costuma aproveitar melhor a GPU.\n"
@@ -804,6 +839,33 @@ class TrainingWindow(QMainWindow):
             f"Dataset: train {train_images} imgs/{train_labels} labels | "
             f"val {val_images} imgs/{val_labels} labels"
         )
+
+    def create_colab_dataset_zip(self) -> None:
+        selected_path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Salvar dataset para o Colab",
+            str(COLAB_DATASET_ZIP),
+            "Zip (*.zip)",
+        )
+        if not selected_path:
+            return
+
+        output_path = Path(selected_path)
+        if output_path.suffix.lower() != ".zip":
+            output_path = output_path.with_suffix(".zip")
+
+        try:
+            file_count = create_dataset_zip(output_path)
+        except OSError as error:
+            message = f"Falha ao criar {output_path.name}: {error}"
+            self.status_label.setText(message)
+            self.log_output.appendPlainText(message)
+            return
+
+        size_mb = output_path.stat().st_size / (1024 * 1024)
+        message = f"Dataset Colab criado: {output_path} | {file_count} arquivos | {size_mb:.1f} MB"
+        self.status_label.setText(f"{self.dataset_summary()} | {message}")
+        self.log_output.appendPlainText(message)
 
     def count_files(self, directory: Path, extensions: set[str]) -> int:
         if not directory.exists():
@@ -907,6 +969,8 @@ class TrainingWindow(QMainWindow):
             "yolo11m.pt": "Medium - mais preciso, mais VRAM/tempo",
             "yolo11l.pt": "Large - pesado, melhor para dataset maior",
             "yolo11x.pt": "XLarge - mais pesado, maior custo de treino",
+            "rtdetr-l.pt": "RT-DETR Large - transformer, preciso e mais lento",
+            "rtdetr-x.pt": "RT-DETR XLarge - mais pesado/preciso, exige mais VRAM",
         }
         local_models = sorted(
             {

@@ -6,7 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT = ROOT / "colab_packages" / "mahjongmaster_colab_dataset.zip"
+DEFAULT_OUTPUT = ROOT / "mahjongmaster_colab_dataset.zip"
 INCLUDED_EXTENSIONS = {".yaml", ".yml", ".png", ".jpg", ".jpeg", ".txt"}
 
 

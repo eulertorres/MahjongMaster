@@ -36,4 +36,5 @@ TILE_CLASSES = [
     "man_5_red",
     "pin_5_red",
     "sou_5_red",
+    "tile_back",
 ]

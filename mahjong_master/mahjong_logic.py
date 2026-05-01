@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import lru_cache
 from typing import Callable, Iterable
 
 
@@ -11,6 +12,11 @@ WINDS = ("wind_east", "wind_south", "wind_west", "wind_north")
 DRAGONS = ("dragon_white", "dragon_green", "dragon_red")
 HONORS = (*WINDS, *DRAGONS)
 TERMINAL_NUMBERS = {1, 9}
+ALL_BASE_KEYS = (
+    *(f"{suit}_{value}" for suit in SUITS for value in range(1, 10)),
+    *HONORS,
+)
+BASE_KEY_INDEX = {key: index for index, key in enumerate(ALL_BASE_KEYS)}
 
 
 class MeldKind(str, Enum):
@@ -104,6 +110,63 @@ class YakuMatch:
 
 
 @dataclass(frozen=True)
+class TileNeed:
+    tile: Tile
+    score: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class ChiiOption:
+    discarded_tile: Tile
+    needed_tiles: tuple[Tile, Tile]
+    sequence: tuple[Tile, Tile, Tile]
+
+    @property
+    def compact(self) -> str:
+        needed = "+".join(tile.compact for tile in self.needed_tiles)
+        sequence = "-".join(str(tile.value) for tile in sort_tiles(self.sequence))
+        return f"{self.discarded_tile.compact} com {needed} => {sequence}-{self.discarded_tile.suit}"
+
+
+@dataclass(frozen=True)
+class PonOption:
+    discarded_tile: Tile
+    source_player: str
+    matching_tiles: tuple[Tile, Tile]
+
+    @property
+    def compact(self) -> str:
+        pair = "+".join(tile.compact for tile in self.matching_tiles)
+        return f"{self.discarded_tile.compact} de {self.source_player} com {pair}"
+
+
+@dataclass(frozen=True)
+class KanOption:
+    tile: Tile
+    source_player: str
+    tiles: tuple[Tile, ...]
+
+    @property
+    def compact(self) -> str:
+        return f"{self.tile.compact} 4x ({self.source_player})"
+
+
+@dataclass(frozen=True)
+class CallDecision:
+    action: str
+    recommended: bool
+    confidence: int
+    option: str
+    reason: str
+
+    @property
+    def compact(self) -> str:
+        verdict = "SIM" if self.recommended else "NAO"
+        return f"{self.action} {verdict} {self.confidence}%: {self.option} ({self.reason})"
+
+
+@dataclass(frozen=True)
 class HandDecomposition:
     melds: tuple[Meld, ...]
     pair: tuple[Tile, Tile]
@@ -114,15 +177,42 @@ class HandState:
     hand_tiles: list[Tile]
     open_melds: list[Meld]
     likely_yaku: list[YakuMatch]
+    blocked_yaku: list[YakuMatch] = field(default_factory=list)
     missing_count: int = 0
     discard_candidates: list[Tile] = field(default_factory=list)
+    discard_reason: str = ""
+    furiten_waits: list[TileNeed] = field(default_factory=list)
     discarded_tiles: list[Tile] = field(default_factory=list)
+    discarded_by_player: dict[str, list[Tile]] = field(default_factory=dict)
+    opponent_open_tiles: dict[str, list[Tile]] = field(default_factory=dict)
+    helpful_missing_tiles: list[TileNeed] = field(default_factory=list)
+    chii_button_visible: bool = False
+    chii_discard: Tile | None = None
+    chii_options: list[ChiiOption] = field(default_factory=list)
+    pon_button_visible: bool = False
+    pon_source_player: str | None = None
+    pon_discard: Tile | None = None
+    pon_options: list[PonOption] = field(default_factory=list)
+    kan_button_visible: bool = False
+    kan_options: list[KanOption] = field(default_factory=list)
+    riichi_button_visible: bool = False
+    win_button_visible: bool = False
+    call_decisions: list[CallDecision] = field(default_factory=list)
+    dora_indicators: list[Tile] = field(default_factory=list)
+    player_winds: dict[str, str] = field(default_factory=dict)
 
     @property
     def all_known_tiles(self) -> list[Tile]:
         tiles = list(self.hand_tiles)
         for meld in self.open_melds:
             tiles.extend(meld.tiles)
+        return tiles
+
+    @property
+    def all_visible_tiles(self) -> list[Tile]:
+        tiles = [*self.all_known_tiles, *self.discarded_tiles, *self.dora_indicators]
+        for opponent_tiles in self.opponent_open_tiles.values():
+            tiles.extend(opponent_tiles)
         return tiles
 
     @property
@@ -137,31 +227,101 @@ class HandState:
     def expected_visible_min(self) -> int:
         return 13 + self.kan_count
 
+    @property
+    def dora_tiles(self) -> list[Tile]:
+        return [
+            dora
+            for indicator in self.dora_indicators
+            if (dora := dora_from_indicator(indicator)) is not None
+        ]
+
     def refresh_missing_count(self) -> None:
         self.missing_count = max(0, self.expected_visible_min - len(self.all_known_tiles))
 
     def summary(self) -> str:
         hand_items = [tile.compact for tile in self.hand_tiles]
         hand_items.extend("???" for _ in range(self.missing_count))
-        hand = " | ".join(hand_items) or "-"
-        melds = " | ".join(meld.compact for meld in self.open_melds)
-        yaku = ", ".join(f"{match.yaku.name} {match.confidence}%" for match in self.likely_yaku[:5]) or "-"
-        parts = [f"Hand: {hand}"]
-        if melds:
-            parts.append(melds)
-        parts.append(f"Yaku provavel: {yaku}")
+        meld_items = [meld.compact for meld in self.open_melds]
+        hand = self.format_grouped(hand_items, group_size=8)
+        melds = self.format_grouped(meld_items, group_size=2)
+        yaku = self.format_grouped((f"{match.yaku.name} {match.confidence}%" for match in self.likely_yaku), group_size=3)
+        blocked = self.format_grouped((f"{match.yaku.name} 0% ({match.reason})" for match in self.blocked_yaku[:8]), group_size=2)
+        needs = self.format_grouped(
+            (f"{need.tile.compact} {need.score}% ({need.reason})" for need in self.helpful_missing_tiles[:8]),
+            group_size=3,
+        )
+        furiten = self.format_grouped(
+            (f"{need.tile.compact} {need.score}% ({need.reason})" for need in self.furiten_waits[:6]),
+            group_size=3,
+        )
+        best_discard = self.format_grouped((tile.compact for tile in self.discard_candidates[:4]), group_size=4)
+        discard_reason = self.discard_reason or "menor contribuicao estimada para fechar a mao"
+
+        dora = self.format_pipe(tile.compact for tile in self.dora_tiles[:5])
+        indicators = self.format_pipe(tile.compact for tile in self.dora_indicators[:5])
+        winds = " | ".join(
+            f"{label}:{self.player_winds.get(player, '?')}"
+            for player, label in (("principal", "P"), ("esquerda", "E"), ("cima", "C"), ("direita", "D"))
+        )
+        parts = [f"[INFO] {len(self.all_known_tiles)}/{self.expected_visible_min} pecas | Ventos {winds} | Dora {dora} | Indic {indicators}"]
         if self.missing_count:
-            parts.append(
-                f"Analise incompleta: faltam {self.missing_count} peca(s); "
-                "numero de pecas insuficiente para decisao confiavel."
-            )
-        if self.discard_candidates:
-            discards = " | ".join(tile.compact for tile in self.discard_candidates)
-            parts.append(f"Descartes que nao contribuem: {discards}")
-        if self.discarded_tiles:
-            visible_discards = " | ".join(tile.compact for tile in self.discarded_tiles[:18])
-            parts.append(f"Descartes vistos: {visible_discards}")
+            parts.append(f"[INFO] Incompleta: faltam {self.missing_count} peca(s); decisao pode oscilar.")
+
+        parts.extend(["[MAO] Fechada:", f"  {hand}"])
+        if meld_items:
+            parts.extend(["[MAO] Abertas:", f"  {melds}"])
+
+        parts.extend(["[YAKU] Provaveis/ativos:", f"  {yaku}"])
+        if self.blocked_yaku:
+            parts.extend(["[YAKU] Bloqueados:", f"  {blocked}"])
+        parts.extend(["[DESCARTE] Melhor descarte agora:", f"  {best_discard}", f"  Motivo: {discard_reason}"])
+        if furiten:
+            parts.extend(["[FURITEN] Esperas arriscadas:", f"  {furiten}"])
+        parts.extend(["[FALTAM] Pecas que mais ajudam:", f"  {needs}"])
+
+        call_summary = self.format_grouped((decision.compact for decision in self.call_decisions), group_size=1)
+        if call_summary != "-" or self.chii_button_visible or self.pon_button_visible or self.kan_button_visible:
+            buttons = []
+            if self.chii_button_visible:
+                buttons.append("Chii")
+            if self.pon_button_visible:
+                buttons.append("Pon")
+            if self.kan_button_visible:
+                buttons.append("Kan")
+            if self.riichi_button_visible:
+                buttons.append("Riichi")
+            if self.win_button_visible:
+                buttons.append("Ron/Tsumo")
+            parts.extend(["[CALL]", f"  Botoes: {', '.join(buttons) if buttons else '-'}", f"  {call_summary}"])
+
+        if self.discarded_by_player or self.discarded_tiles:
+            parts.append("[DESCARTES VISTOS]")
+            for player in ("principal", "esquerda", "cima", "direita"):
+                tiles = self.discarded_by_player.get(player, [])
+                parts.append(f"  {player.capitalize()}: {self.format_grouped((tile.compact for tile in tiles[:18]), group_size=10)}")
+
+        if self.opponent_open_tiles:
+            parts.append("[OPONENTES ABERTAS]")
+            for player in ("esquerda", "cima", "direita"):
+                tiles = self.opponent_open_tiles.get(player, [])
+                parts.append(f"  {player.capitalize()}: {self.format_grouped((tile.compact for tile in tiles[:18]), group_size=10)}")
+
         return "\n".join(parts)
+
+    @staticmethod
+    def format_pipe(items: Iterable[str]) -> str:
+        values = [item for item in items if item]
+        return " | ".join(values) if values else "-"
+
+    @staticmethod
+    def format_grouped(items: Iterable[str], group_size: int = 8) -> str:
+        values = [item for item in items if item]
+        if not values:
+            return "-"
+        lines = []
+        for index in range(0, len(values), group_size):
+            lines.append(" | ".join(values[index : index + group_size]))
+        return "\n  ".join(lines)
 
 
 @dataclass(frozen=True)
@@ -170,6 +330,7 @@ class YakuPlan:
     confidence: int
     useful_keys: frozenset[str]
     reason: str = "estimate"
+    wanted_keys: frozenset[str] = frozenset()
 
 
 def tile_from_name(name: str) -> Tile | None:
@@ -201,6 +362,31 @@ def representative_tile(base_key: str) -> Tile:
     if tile is None:
         raise ValueError(f"Invalid tile key: {base_key}")
     return tile
+
+
+def dora_from_indicator(indicator: Tile) -> Tile | None:
+    if indicator.is_suited:
+        value = int(indicator.value)
+        next_value = 1 if value == 9 else value + 1
+        return Tile(indicator.suit, next_value)
+
+    if indicator.suit == "wind":
+        wind_order = ("east", "south", "west", "north")
+        if indicator.value not in wind_order:
+            return None
+        return Tile("wind", wind_order[(wind_order.index(str(indicator.value)) + 1) % 4])
+
+    if indicator.suit == "dragon":
+        dragon_order = ("white", "green", "red")
+        if indicator.value not in dragon_order:
+            return None
+        return Tile("dragon", dragon_order[(dragon_order.index(str(indicator.value)) + 1) % 3])
+
+    return None
+
+
+def dora_base_keys(state: HandState) -> set[str]:
+    return {tile.base_key for tile in state.dora_tiles}
 
 
 def classify_meld(tiles: list[Tile]) -> Meld:
@@ -501,7 +687,13 @@ def estimate_shape_yaku(state: HandState) -> tuple[list[YakuMatch], list[Tile]]:
         return [], []
     matches = [YakuMatch(yaku_by_key(plan.yaku_key), plan.reason, plan.confidence) for plan in plans]
     useful_keys = set().union(*(set(plan.useful_keys) for plan in plans))
-    discards = [tile for tile in state.hand_tiles if tile.base_key not in useful_keys and not tile.red]
+    state.helpful_missing_tiles = helpful_missing_tiles_from_plans(plans, state)
+    dora_keys = dora_base_keys(state)
+    discards = [
+        tile
+        for tile in state.hand_tiles
+        if tile.base_key not in useful_keys and not tile.red and tile.base_key not in dora_keys
+    ]
     return matches, discards
 
 
@@ -512,7 +704,8 @@ def top_yaku_plans(state: HandState, limit: int = 3) -> list[YakuPlan]:
 
     candidates: list[YakuPlan] = []
     for match in suppress_weaker_matches(confirmed_yaku_matches(state)):
-        candidates.append(YakuPlan(match.yaku.key, match.confidence, confirmed_useful_keys(state, match.yaku.key), match.reason))
+        useful = confirmed_useful_keys(state, match.yaku.key)
+        candidates.append(YakuPlan(match.yaku.key, match.confidence, useful, match.reason, missing_keys_for_yaku(match.yaku.key, state)))
 
     candidates.append(compatibility_candidate("tanyao", tiles, lambda tile: tile.is_simple))
     candidates.append(
@@ -538,24 +731,36 @@ def top_yaku_plans(state: HandState, limit: int = 3) -> list[YakuPlan]:
     )
 
     candidates.extend(flush_candidates(tiles))
-    candidates.extend(dragon_candidates(tiles))
+    candidates.extend(dragon_candidates(tiles, state.discarded_tiles))
     candidates.extend(wind_candidates(tiles, state.discarded_tiles))
     candidates.extend(seven_pairs_candidate(state))
     candidates.extend(pure_straight_candidates(tiles))
 
-    valid = [candidate for candidate in candidates if candidate.confidence >= 45 and candidate.useful_keys]
+    valid = [
+        candidate
+        for candidate in candidates
+        if candidate.confidence >= 45
+        and candidate.useful_keys
+        and not yaku_block_reason(candidate.yaku_key, state)
+    ]
     if not valid:
         return []
 
     best_by_key: dict[str, YakuPlan] = {}
     for candidate in valid:
         confidence = min(candidate.confidence, 70) if state.missing_count and candidate.reason != "shape" else candidate.confidence
-        candidate = YakuPlan(candidate.yaku_key, confidence, candidate.useful_keys, candidate.reason)
+        candidate = YakuPlan(candidate.yaku_key, confidence, candidate.useful_keys, candidate.reason, candidate.wanted_keys)
         previous = best_by_key.get(candidate.yaku_key)
         if previous is None or candidate.confidence > previous.confidence:
             best_by_key[candidate.yaku_key] = candidate
 
-    return sorted(best_by_key.values(), key=lambda item: item.confidence, reverse=True)[:limit]
+    return select_display_plans(sorted(best_by_key.values(), key=lambda item: item.confidence, reverse=True), limit)
+
+
+def select_display_plans(plans: list[YakuPlan], base_limit: int = 3) -> list[YakuPlan]:
+    complete_count = sum(1 for plan in plans if plan.confidence >= 100)
+    display_limit = max(base_limit, complete_count + base_limit)
+    return plans[:display_limit]
 
 
 def confirmed_yaku_matches(state: HandState) -> list[YakuMatch]:
@@ -563,7 +768,7 @@ def confirmed_yaku_matches(state: HandState) -> list[YakuMatch]:
     for yaku in YAKU_REGISTRY:
         if not yaku.enabled or yaku.matcher is None:
             continue
-        if yaku.closed_only and not state.is_closed:
+        if yaku_block_reason(yaku.key, state):
             continue
         if yaku.matcher(state):
             matches.append(YakuMatch(yaku, "shape"))
@@ -580,15 +785,99 @@ def confirmed_useful_keys(state: HandState, yaku_key: str) -> frozenset[str]:
         return frozenset(tile.base_key for tile in tiles if tile.is_terminal)
     if yaku_key in {"yakuhai_dragon", "haku", "hatsu", "chun"}:
         return frozenset(tile.base_key for tile in tiles if tile.suit == "dragon")
-    if yaku_key in {"seat_wind", "prevalent_wind"}:
+    if yaku_key == "seat_wind":
         return frozenset(tile.base_key for tile in tiles if tile.suit == "wind")
+    if yaku_key == "prevalent_wind":
+        return frozenset(tile.base_key for tile in tiles if tile.base_key == "wind_east")
     return frozenset(tile.base_key for tile in tiles if tile.base_key)
+
+
+def blocked_yaku_matches(state: HandState) -> list[YakuMatch]:
+    matches = []
+    for yaku in YAKU_REGISTRY:
+        reason = yaku_block_reason(yaku.key, state)
+        if reason:
+            matches.append(YakuMatch(yaku, reason, 0))
+    return sorted(matches, key=lambda match: (match.reason == "mao aberta", match.yaku.name))
+
+
+def yaku_block_reason(yaku_key: str, state: HandState) -> str | None:
+    yaku = yaku_by_key(yaku_key)
+    open_melds = state.open_melds
+    if not open_melds:
+        return None
+
+    if yaku.closed_only or yaku_key in CLOSED_ONLY_YAKU_KEYS:
+        return "mao aberta"
+
+    open_tiles = [tile for meld in open_melds for tile in meld.tiles]
+    if yaku_key == "tanyao" and any(not tile.is_simple for tile in open_tiles):
+        return "chamada aberta contem terminal/honra"
+    if yaku_key == "honroutou" and any(not is_terminal_or_honor(tile) for tile in open_tiles):
+        return "chamada aberta contem simples"
+    if yaku_key == "chinroutou" and any(not tile.is_terminal for tile in open_tiles):
+        return "chamada aberta contem nao-terminal"
+    if yaku_key == "chanta" and any(not meld_contains_terminal_or_honor(meld) for meld in open_melds):
+        return "chamada aberta sem terminal/honra"
+    if yaku_key == "junchan" and (
+        any(any(tile.is_honor for tile in meld.tiles) for meld in open_melds)
+        or any(not meld_contains_terminal(meld) for meld in open_melds)
+    ):
+        return "chamada aberta nao serve para Fully Outside Hand"
+    if yaku_key == "toitoi" and any(meld.is_sequence for meld in open_melds):
+        return "chamada aberta e sequencia"
+    if yaku_key in {"honitsu", "chinitsu", "chuuren_poutou", "junsei_chuuren_poutou"}:
+        reason = flush_block_reason(yaku_key, open_tiles)
+        if reason:
+            return reason
+    if yaku_key == "tsuuiisou" and any(not tile.is_honor for tile in open_tiles):
+        return "chamada aberta contem numero"
+    if yaku_key == "ryuuiisou" and any(not is_green_tile(tile) for tile in open_tiles):
+        return "chamada aberta contem peca nao-verde"
+    if yaku_key == "daisuushii" and any(not all(tile.suit == "wind" for tile in meld.tiles) for meld in open_melds):
+        return "chamada aberta nao e vento"
+    if yaku_key == "shousuushii" and count_open_melds_not_matching(open_melds, lambda tile: tile.suit == "wind") > 1:
+        return "muitas chamadas abertas sem vento"
+    if yaku_key == "daisangen" and count_open_melds_not_matching(open_melds, lambda tile: tile.suit == "dragon") > 1:
+        return "muitas chamadas abertas sem dragao"
+    if yaku_key == "suukantsu" and any(meld.kind == MeldKind.CHI for meld in open_melds):
+        return "chamada aberta e sequencia"
+
+    return None
+
+
+def flush_block_reason(yaku_key: str, tiles: list[Tile]) -> str | None:
+    suited_suits = {tile.suit for tile in tiles if tile.is_suited}
+    has_honor = any(tile.is_honor for tile in tiles)
+    if yaku_key in {"chinitsu", "chuuren_poutou", "junsei_chuuren_poutou"} and has_honor:
+        return "chamada aberta contem honra"
+    if len(suited_suits) > 1:
+        return "chamadas abertas misturam naipes"
+    return None
+
+
+def count_open_melds_not_matching(open_melds: list[Meld], predicate: Callable[[Tile], bool]) -> int:
+    return sum(1 for meld in open_melds if not all(predicate(tile) for tile in meld.tiles))
+
+
+def is_green_tile(tile: Tile) -> bool:
+    return tile.base_key in {"sou_2", "sou_3", "sou_4", "sou_6", "sou_8", "dragon_green"}
+
+
+CLOSED_ONLY_YAKU_KEYS = {
+    "kokushi_musou",
+    "kokushi_musou_13",
+    "suuankou",
+    "suuankou_tanki",
+}
 
 
 def compatibility_candidate(key: str, tiles: list[Tile], predicate: Callable[[Tile], bool]) -> YakuPlan:
     contributing = [tile for tile in tiles if predicate(tile)]
     confidence = round(100 * len(contributing) / max(1, len(tiles)))
-    return YakuPlan(key, confidence, frozenset(tile.base_key for tile in contributing))
+    useful = frozenset(tile.base_key for tile in contributing)
+    wanted = generic_wanted_keys(key, tiles)
+    return YakuPlan(key, confidence, useful, wanted_keys=wanted)
 
 
 def flush_candidates(tiles: list[Tile]) -> list[YakuPlan]:
@@ -596,28 +885,47 @@ def flush_candidates(tiles: list[Tile]) -> list[YakuPlan]:
     for suit in SUITS:
         half_contrib = [tile for tile in tiles if tile.is_honor or (tile.is_suited and tile.suit == suit)]
         half_confidence = round(100 * len(half_contrib) / max(1, len(tiles)))
-        candidates.append(YakuPlan("honitsu", half_confidence, frozenset(tile.base_key for tile in half_contrib)))
+        candidates.append(
+            YakuPlan(
+                "honitsu",
+                half_confidence,
+                frozenset(tile.base_key for tile in half_contrib),
+                wanted_keys=flush_wanted_keys(suit, allow_honors=True),
+            )
+        )
 
         full_contrib = [tile for tile in tiles if tile.is_suited and tile.suit == suit]
         full_confidence = round(100 * len(full_contrib) / max(1, len(tiles)))
-        candidates.append(YakuPlan("chinitsu", full_confidence, frozenset(tile.base_key for tile in full_contrib)))
+        candidates.append(
+            YakuPlan(
+                "chinitsu",
+                full_confidence,
+                frozenset(tile.base_key for tile in full_contrib),
+                wanted_keys=flush_wanted_keys(suit, allow_honors=False),
+            )
+        )
     return candidates
 
 
-def dragon_candidates(tiles: list[Tile]) -> list[YakuPlan]:
+def dragon_candidates(tiles: list[Tile], discarded_tiles: list[Tile]) -> list[YakuPlan]:
     key_map = {
         "dragon_white": "haku",
         "dragon_green": "hatsu",
         "dragon_red": "chun",
     }
     counts = canonical_counter(tiles)
+    discarded_counts = canonical_counter(discarded_tiles)
     candidates = []
     for dragon_key, yaku_key in key_map.items():
         count = counts[dragon_key]
         if count == 0:
             continue
+        remaining_unseen = max(0, 4 - discarded_counts[dragon_key])
+        needed = max(0, 3 - count)
+        if needed > remaining_unseen:
+            continue
         confidence = min(95, 35 + count * 20)
-        candidates.append(YakuPlan(yaku_key, confidence, frozenset({dragon_key})))
+        candidates.append(YakuPlan(yaku_key, confidence, frozenset({dragon_key}), wanted_keys=frozenset({dragon_key})))
     return candidates
 
 
@@ -629,14 +937,15 @@ def wind_candidates(tiles: list[Tile], discarded_tiles: list[Tile]) -> list[Yaku
         count = counts[wind_key]
         if count == 0:
             continue
-        remaining_unseen = max(0, 4 - count - discarded_counts[wind_key])
+        remaining_unseen = max(0, 4 - discarded_counts[wind_key])
         needed = max(0, 3 - count)
         if needed > remaining_unseen:
             continue
         penalty = discarded_counts[wind_key] * 12
         confidence = max(0, min(92, 35 + count * 22 - penalty))
-        candidates.append(YakuPlan("seat_wind", confidence, frozenset({wind_key})))
-        candidates.append(YakuPlan("prevalent_wind", confidence, frozenset({wind_key})))
+        candidates.append(YakuPlan("seat_wind", confidence, frozenset({wind_key}), wanted_keys=frozenset({wind_key})))
+        if wind_key == "wind_east":
+            candidates.append(YakuPlan("prevalent_wind", confidence, frozenset({wind_key}), wanted_keys=frozenset({wind_key})))
     return candidates
 
 
@@ -649,7 +958,8 @@ def seven_pairs_candidate(state: HandState) -> list[YakuPlan]:
     useful_keys |= paired_keys
     single_progress = min(7 - len(paired_keys), len(useful_keys - paired_keys)) * 0.15
     confidence = round(100 * min(7, len(paired_keys) + single_progress) / 7)
-    return [YakuPlan("chitoitsu", confidence, frozenset(useful_keys))]
+    wanted = frozenset(key for key, count in counts.items() if count == 1)
+    return [YakuPlan("chitoitsu", confidence, frozenset(useful_keys), wanted_keys=wanted)]
 
 
 def pure_straight_candidates(tiles: list[Tile]) -> list[YakuPlan]:
@@ -660,8 +970,243 @@ def pure_straight_candidates(tiles: list[Tile]) -> list[YakuPlan]:
         present = needed & suit_values
         confidence = round(100 * len(present) / 9)
         useful = frozenset(f"{suit}_{value}" for value in present)
-        candidates.append(YakuPlan("ittsu", confidence, useful))
+        wanted = frozenset(f"{suit}_{value}" for value in needed - present)
+        candidates.append(YakuPlan("ittsu", confidence, useful, wanted_keys=wanted))
     return candidates
+
+
+def helpful_missing_tiles_from_plans(plans: list[YakuPlan], state: HandState) -> list[TileNeed]:
+    visible_counts = canonical_counter(state.all_visible_tiles)
+    scores: Counter[str] = Counter()
+    reasons: dict[str, list[str]] = {}
+
+    for plan in plans:
+        yaku_name = yaku_by_key(plan.yaku_key).name
+        for key in plan.wanted_keys:
+            available = max(0, 4 - visible_counts[key])
+            if available <= 0:
+                continue
+            score = max(1, round(plan.confidence * (available / 4)))
+            previous_reasons = reasons.setdefault(key, [])
+            bonus = min(15, len(previous_reasons) * 5)
+            scores[key] = max(scores[key], score + bonus)
+            previous_reasons.append(yaku_name)
+
+    needs = []
+    for key, score in scores.most_common(8):
+        try:
+            tile = representative_tile(key)
+        except ValueError:
+            continue
+        reason = "+".join(dict.fromkeys(reasons.get(key, [])[:2]))
+        needs.append(TileNeed(tile, min(100, score), reason or "plano"))
+    return needs
+
+
+def missing_keys_for_yaku(yaku_key: str, state: HandState) -> frozenset[str]:
+    counts = canonical_counter(state.all_known_tiles)
+    if yaku_key in {"haku", "hatsu", "chun"}:
+        dragon_key = {"haku": "dragon_white", "hatsu": "dragon_green", "chun": "dragon_red"}[yaku_key]
+        return frozenset({dragon_key}) if counts[dragon_key] < 3 else frozenset()
+    if yaku_key == "yakuhai_dragon":
+        return frozenset(key for key in DRAGONS if 0 < counts[key] < 3)
+    if yaku_key == "seat_wind":
+        return frozenset(key for key in WINDS if 0 < counts[key] < 3)
+    if yaku_key == "prevalent_wind":
+        return frozenset({"wind_east"}) if 0 < counts["wind_east"] < 3 else frozenset()
+    if yaku_key == "ittsu":
+        return frozenset().union(*(pure_straight_candidates(state.all_known_tiles)[index].wanted_keys for index in range(3)))
+    return generic_wanted_keys(yaku_key, state.all_known_tiles)
+
+
+def generic_wanted_keys(yaku_key: str, tiles: list[Tile]) -> frozenset[str]:
+    if yaku_key == "tanyao":
+        return frozenset(f"{suit}_{value}" for suit in SUITS for value in range(2, 9))
+    if yaku_key == "honroutou":
+        return frozenset(
+            [*(f"{suit}_{value}" for suit in SUITS for value in (1, 9)), *HONORS]
+        )
+    if yaku_key == "chanta":
+        return frozenset(
+            [*(f"{suit}_{value}" for suit in SUITS for value in (1, 2, 3, 7, 8, 9)), *HONORS]
+        )
+    if yaku_key == "junchan":
+        return frozenset(f"{suit}_{value}" for suit in SUITS for value in (1, 2, 3, 7, 8, 9))
+    return frozenset(tile.base_key for tile in tiles)
+
+
+def flush_wanted_keys(suit: str, allow_honors: bool) -> frozenset[str]:
+    keys = {f"{suit}_{value}" for value in range(1, 10)}
+    if allow_honors:
+        keys.update(HONORS)
+    return frozenset(keys)
+
+
+def chii_options_for_hand(hand_tiles: list[Tile], discarded_tile: Tile | None) -> list[ChiiOption]:
+    if discarded_tile is None or not discarded_tile.is_suited:
+        return []
+
+    counts = canonical_counter(hand_tiles)
+    suit = discarded_tile.suit
+    value = int(discarded_tile.value)
+    options: list[ChiiOption] = []
+    for start in (value - 2, value - 1, value):
+        sequence_values = [start, start + 1, start + 2]
+        if start < 1 or start > 7 or value not in sequence_values:
+            continue
+        needed_values = [item for item in sequence_values if item != value]
+        needed_keys = [f"{suit}_{item}" for item in needed_values]
+        if all(counts[key] > 0 for key in needed_keys):
+            needed_tiles = tuple(representative_tile(key) for key in needed_keys)
+            sequence = tuple(representative_tile(f"{suit}_{item}") for item in sequence_values)
+            options.append(ChiiOption(discarded_tile, needed_tiles, sequence))
+    return options
+
+
+def kan_options_for_hand(hand_tiles: list[Tile], discarded_tile: Tile | None, source_player: str | None) -> list[KanOption]:
+    counts = canonical_counter(hand_tiles)
+    options: list[KanOption] = []
+    for key, count in counts.items():
+        if count >= 4:
+            tile = representative_tile(key)
+            options.append(KanOption(tile, "fechado", tuple(tile for _ in range(4))))
+
+    if discarded_tile is not None and source_player not in (None, "principal") and counts[discarded_tile.base_key] >= 3:
+        matching = [tile for tile in hand_tiles if tile.base_key == discarded_tile.base_key][:3]
+        options.append(KanOption(discarded_tile, source_player or "oponente", tuple([discarded_tile, *matching])))
+    return options
+
+
+def call_decisions_for_state(state: HandState) -> list[CallDecision]:
+    decisions: list[CallDecision] = []
+    before_score = call_plan_score(state)
+    if state.chii_button_visible:
+        decisions.append(best_call_decision("Chii", state, state.chii_options, before_score))
+    if state.pon_button_visible:
+        decisions.append(best_call_decision("Pon", state, state.pon_options, before_score))
+    if state.kan_button_visible:
+        decisions.append(best_call_decision("Kan", state, state.kan_options, before_score))
+    return decisions
+
+
+def best_call_decision(action: str, state: HandState, options, before_score: int) -> CallDecision:
+    if not options:
+        return CallDecision(action, False, 0, "-", "sem combinacao valida na mao")
+
+    simulations: list[tuple[int, str, HandState, list[YakuPlan]]] = []
+    for option in options:
+        simulated = simulate_call(action, state, option)
+        if simulated is None:
+            continue
+        simulated.likely_yaku = likely_yaku(simulated)
+        plans = call_candidate_plans(simulated)
+        simulations.append((call_plan_score_from_plans(plans), option.compact, simulated, plans))
+
+    if not simulations:
+        return CallDecision(action, False, 0, options[0].compact, "chamada quebraria a mao detectada")
+
+    after_score, option_text, simulated, after_plans = max(simulations, key=lambda item: item[0])
+    delta = after_score - before_score
+    blocked_closed = any(match.reason == "mao aberta" and match.yaku.closed_only for match in simulated.blocked_yaku)
+    complete_open_yaku = [
+        plan
+        for plan in after_plans
+        if plan.confidence >= 100
+        and not yaku_by_key(plan.yaku_key).closed_only
+        and not yaku_by_key(plan.yaku_key).situational
+    ]
+
+    if action == "Chii":
+        # Chii opens the hand and commonly kills menzen paths, so require a
+        # clear future gain unless it completes a non-closed yaku immediately.
+        recommended = bool(complete_open_yaku) or (after_score >= 60 and delta >= 12)
+    else:
+        # Pon/Kan are allowed when the simulated future keeps or improves the
+        # best open-yaku plan. This prevents rejecting yakuhai/dragon calls just
+        # because closed-only yakus become unavailable.
+        recommended = bool(complete_open_yaku) or (after_score >= 50 and delta >= -4)
+
+    reason = f"score {before_score}->{after_score}"
+    if complete_open_yaku:
+        names = "+".join(yaku_by_key(plan.yaku_key).name for plan in complete_open_yaku[:2])
+        reason += f"; completa {names}"
+    elif blocked_closed and not recommended:
+        reason += "; abre mao e futuro fica pior"
+    elif delta > 0:
+        reason += "; melhora planos ativos"
+    elif recommended:
+        reason += "; mantem yaku aberto viavel"
+    else:
+        reason += "; perde muita compatibilidade"
+    return CallDecision(action, recommended, max(0, min(100, after_score)), option_text, reason)
+
+
+def call_candidate_plans(state: HandState) -> list[YakuPlan]:
+    return [
+        plan
+        for plan in top_yaku_plans(state, limit=6)
+        if not yaku_by_key(plan.yaku_key).situational
+    ]
+
+
+def call_plan_score(state: HandState) -> int:
+    return call_plan_score_from_plans(call_candidate_plans(state))
+
+
+def call_plan_score_from_plans(plans: list[YakuPlan]) -> int:
+    if not plans:
+        return 0
+    best = plans[0].confidence
+    support = sum(plan.confidence for plan in plans[1:3]) // 5
+    return max(0, min(100, best + support))
+
+
+def simulate_call(action: str, state: HandState, option) -> HandState | None:
+    hand_tiles = list(state.hand_tiles)
+    if action == "Chii":
+        remaining = remove_matching_tiles(hand_tiles, option.needed_tiles)
+        if remaining is None:
+            return None
+        meld = Meld(MeldKind.CHI, tuple(sort_tiles(option.sequence)))
+    elif action == "Pon":
+        remaining = remove_matching_tiles(hand_tiles, option.matching_tiles)
+        if remaining is None:
+            return None
+        meld = Meld(MeldKind.PON, tuple(sort_tiles([option.discarded_tile, *option.matching_tiles])))
+    elif action == "Kan":
+        if option.source_player == "fechado":
+            remaining = remove_matching_tiles(hand_tiles, option.tiles)
+        else:
+            remaining = remove_matching_tiles(hand_tiles, option.tiles[1:])
+        if remaining is None:
+            return None
+        meld = Meld(MeldKind.KAN, tuple(sort_tiles(option.tiles)))
+    else:
+        return None
+
+    simulated = HandState(
+        hand_tiles=remaining,
+        open_melds=[*state.open_melds, meld],
+        likely_yaku=[],
+        discarded_tiles=state.discarded_tiles,
+        discarded_by_player=state.discarded_by_player,
+        opponent_open_tiles=state.opponent_open_tiles,
+        dora_indicators=state.dora_indicators,
+        player_winds=state.player_winds,
+    )
+    return simulated
+
+
+def remove_matching_tiles(hand_tiles: list[Tile], required_tiles: Iterable[Tile]) -> list[Tile] | None:
+    remaining = list(hand_tiles)
+    for required in required_tiles:
+        for index, tile in enumerate(remaining):
+            if tile.base_key == required.base_key:
+                remaining.pop(index)
+                break
+        else:
+            return None
+    return remaining
 
 
 YAKU_REGISTRY: list[Yaku] = [
@@ -674,7 +1219,7 @@ YAKU_REGISTRY: list[Yaku] = [
     Yaku("ryanpeikou", "Twice Pure Double Sequence", closed_only=True, matcher=has_twice_pure_double_sequence),
     Yaku("tanyao", "All Simples", matcher=has_all_simples_shape),
     Yaku("seat_wind", "Seat Wind", matcher=lambda state: has_triplet_of(state, set(WINDS))),
-    Yaku("prevalent_wind", "Prevalent Wind", matcher=lambda state: has_triplet_of(state, set(WINDS))),
+    Yaku("prevalent_wind", "Prevalent Wind", matcher=lambda state: has_triplet_of(state, {"wind_east"})),
     Yaku("yakuhai_dragon", "Dragons", matcher=lambda state: has_triplet_of(state, set(DRAGONS))),
     Yaku("haku", "White Dragon", matcher=lambda state: has_triplet_of(state, {"dragon_white"})),
     Yaku("hatsu", "Green Dragon", matcher=lambda state: has_triplet_of(state, {"dragon_green"})),
@@ -722,14 +1267,105 @@ YAKU_REGISTRY: list[Yaku] = [
 
 def likely_yaku(state: HandState) -> list[YakuMatch]:
     state.refresh_missing_count()
+    state.blocked_yaku = blocked_yaku_matches(state)
+    state.furiten_waits = []
     matches, plan_discards = estimate_shape_yaku(state)
     efficiency_discards = inefficient_tiles_for_completion(state)
-    if plan_discards:
+    guaranteed_yaku = has_guaranteed_yaku(state, matches)
+    completion_discards = completion_discard_candidates(state) if guaranteed_yaku or not plan_discards else []
+    if guaranteed_yaku and completion_discards:
+        state.discard_candidates = completion_discards
+        state.helpful_missing_tiles = helpful_tiles_for_completion_after_discard(state, completion_discards[0])
+        state.discard_reason = "yaku garantido; prioriza shanten/ukeire para fechar a mao"
+    elif plan_discards:
         efficiency_keys = {tile.base_key for tile in efficiency_discards}
         state.discard_candidates = [tile for tile in plan_discards if tile.base_key in efficiency_keys or not efficiency_discards]
+        state.discard_reason = "nao contribui para os yakus ativos e/ou esta fraca para fechar a mao"
     else:
-        state.discard_candidates = efficiency_discards
+        state.discard_candidates = completion_discards or efficiency_discards
+        state.discard_reason = "peca isolada ou pouco conectada para completar grupos"
+    if not state.discard_candidates:
+        state.discard_candidates = ranked_discard_candidates(state, top_yaku_plans(state, limit=3))
+        state.discard_reason = "menor contribuicao estimada entre as pecas conhecidas"
+    if state.discard_candidates and not guaranteed_yaku:
+        state.discard_candidates = sort_discard_candidates_by_badness(
+            state,
+            state.discard_candidates,
+            top_yaku_plans(state, limit=3),
+        )
+    update_furiten_summary(state)
     return matches
+
+
+def has_guaranteed_yaku(state: HandState, matches: list[YakuMatch]) -> bool:
+    """Return true when the current visible hand already carries an open-safe yaku.
+
+    Shape estimates such as Half Flush should not override hand completion once
+    a yakuhai triplet is already locked in. Those yakus survive any normal draw
+    and discard, so the next objective becomes finishing four groups and a pair.
+    """
+
+    guaranteed_keys = {
+        "yakuhai_dragon",
+        "haku",
+        "hatsu",
+        "chun",
+        "seat_wind",
+        "prevalent_wind",
+    }
+    return any(match.confidence >= 100 and match.yaku.key in guaranteed_keys for match in matches)
+
+
+def own_discard_keys(state: HandState) -> set[str]:
+    return set(canonical_counter(state.discarded_by_player.get("principal", [])).keys())
+
+
+def winning_wait_keys_after_discard(state: HandState, discarded_tile: Tile) -> frozenset[str]:
+    remaining = remove_one_tile_instance(state.hand_tiles, discarded_tile)
+    if standard_shanten_number(remaining, state.open_melds) != 0:
+        return frozenset()
+
+    seen_counts = canonical_counter(state.all_visible_tiles)
+    waits = []
+    for key in ALL_BASE_KEYS:
+        if seen_counts[key] >= 4:
+            continue
+        tile = representative_tile(key)
+        if standard_shanten_number([*remaining, tile], state.open_melds) == -1:
+            waits.append(key)
+    return frozenset(waits)
+
+
+def furiten_wait_keys_after_discard(state: HandState, discarded_tile: Tile) -> frozenset[str]:
+    own_keys = own_discard_keys(state)
+    if not own_keys:
+        return frozenset()
+    return winning_wait_keys_after_discard(state, discarded_tile) & own_keys
+
+
+def furiten_discard_penalty(state: HandState, discarded_tile: Tile) -> int:
+    waits = furiten_wait_keys_after_discard(state, discarded_tile)
+    if not waits:
+        return 0
+    return min(120, 80 + 12 * (len(waits) - 1))
+
+
+def update_furiten_summary(state: HandState) -> None:
+    if not state.discard_candidates:
+        state.furiten_waits = []
+        return
+
+    waits = furiten_wait_keys_after_discard(state, state.discard_candidates[0])
+    state.furiten_waits = [
+        TileNeed(
+            representative_tile(key),
+            100,
+            "esta nos seus descartes; ron ficaria em furiten",
+        )
+        for key in sorted(waits)
+    ]
+    if state.furiten_waits and "furiten" not in state.discard_reason.lower():
+        state.discard_reason = f"{state.discard_reason}; risco de furiten se aceitar esta espera"
 
 
 def suppress_weaker_matches(matches: list[YakuMatch]) -> list[YakuMatch]:
@@ -742,6 +1378,172 @@ def suppress_weaker_matches(matches: list[YakuMatch]) -> list[YakuMatch]:
     if "ryanpeikou" in keys:
         suppressed.add("iipeikou")
     return [match for match in matches if match.yaku.key not in suppressed]
+
+
+def completion_discard_candidates(state: HandState) -> list[Tile]:
+    tiles = list(state.hand_tiles)
+    if not tiles:
+        return []
+
+    dora_keys = dora_base_keys(state)
+    non_dora_exists = any(tile.base_key not in dora_keys for tile in tiles)
+    non_red_exists = any(not tile.red for tile in tiles)
+    scored: list[tuple[int, int, int, int, int, Tile]] = []
+
+    for index, tile in enumerate(tiles):
+        remaining = remove_one_tile_instance(tiles, tile)
+        shanten = standard_shanten_number(remaining, state.open_melds)
+        improving = improving_tiles_for_completion(state, remaining, shanten)
+        ukeire = sum(available for _tile, available in improving)
+        furiten_penalty = furiten_discard_penalty(state, tile)
+        protection_penalty = 0
+        if tile.red and non_red_exists:
+            protection_penalty += 80
+        if tile.base_key in dora_keys and non_dora_exists:
+            protection_penalty += 70
+        scored.append((shanten, furiten_penalty, -ukeire, protection_penalty, index, tile))
+
+    scored.sort(key=lambda item: item[:5])
+    best_shanten, best_furiten_penalty, best_negative_ukeire = scored[0][0], scored[0][1], scored[0][2]
+    best_ukeire = -best_negative_ukeire
+    return [
+        tile
+        for shanten, furiten_penalty, negative_ukeire, penalty, _index, tile in scored
+        if shanten == best_shanten and -negative_ukeire >= max(0, best_ukeire - 4) and penalty <= 80
+        and furiten_penalty <= best_furiten_penalty
+    ][:4]
+
+
+def helpful_tiles_for_completion_after_discard(state: HandState, discarded_tile: Tile) -> list[TileNeed]:
+    remaining = remove_one_tile_instance(state.hand_tiles, discarded_tile)
+    current_shanten = standard_shanten_number(remaining, state.open_melds)
+    improving = improving_tiles_for_completion(state, remaining, current_shanten)
+    needs = []
+    for tile, available in improving[:8]:
+        score = min(100, max(10, available * 25 + max(0, 3 - current_shanten) * 10))
+        reason = f"avanca shanten; restam {available}"
+        needs.append(TileNeed(tile, score, reason))
+    return needs
+
+
+def improving_tiles_for_completion(
+    state: HandState,
+    hand_tiles: list[Tile],
+    current_shanten: int,
+) -> list[tuple[Tile, int]]:
+    seen_counts = canonical_counter(state.all_visible_tiles)
+    improvements: list[tuple[Tile, int, int]] = []
+    for key in ALL_BASE_KEYS:
+        available = max(0, 4 - seen_counts[key])
+        if available <= 0:
+            continue
+        tile = representative_tile(key)
+        next_shanten = standard_shanten_number([*hand_tiles, tile], state.open_melds)
+        if next_shanten < current_shanten:
+            improvements.append((tile, available, next_shanten))
+
+    improvements.sort(key=lambda item: (item[2], -item[1], item[0].base_key))
+    return [(tile, available) for tile, available, _shanten in improvements]
+
+
+def standard_shanten_number(hand_tiles: list[Tile], open_melds: list[Meld]) -> int:
+    open_meld_count = sum(1 for meld in open_melds if meld.kind in (MeldKind.CHI, MeldKind.PON, MeldKind.KAN))
+    counts = canonical_counter(hand_tiles)
+    count_tuple = tuple(counts[key] for key in ALL_BASE_KEYS)
+    return standard_shanten_from_counts(count_tuple, open_meld_count)
+
+
+@lru_cache(maxsize=20000)
+def standard_shanten_from_counts(count_tuple: tuple[int, ...], open_meld_count: int) -> int:
+    counts = list(count_tuple)
+    best = 8
+
+    def visit(melds: int, taatsu: int, pairs: int) -> None:
+        nonlocal best
+        max_closed_melds = max(0, 4 - open_meld_count)
+        melds = min(melds, max_closed_melds)
+        effective_taatsu = min(taatsu, max(0, max_closed_melds - melds))
+        pair_bonus = 1 if pairs else 0
+        best = min(best, 8 - 2 * (open_meld_count + melds) - effective_taatsu - pair_bonus)
+
+    def first_nonzero_index() -> int | None:
+        return next((index for index, count in enumerate(counts) if count > 0), None)
+
+    seen: set[tuple[tuple[int, ...], int, int, int]] = set()
+
+    def dfs(melds: int, taatsu: int, pairs: int) -> None:
+        visit(melds, taatsu, pairs)
+        memo_key = (tuple(counts), melds, taatsu, pairs)
+        if memo_key in seen:
+            return
+        seen.add(memo_key)
+
+        index = first_nonzero_index()
+        if index is None:
+            return
+
+        key = ALL_BASE_KEYS[index]
+        is_suited_key = key[:3] in SUITS
+        suit = key[:3] if is_suited_key else ""
+        value = int(key.split("_", 1)[1]) if is_suited_key else 0
+
+        if counts[index] >= 3:
+            counts[index] -= 3
+            dfs(melds + 1, taatsu, pairs)
+            counts[index] += 3
+
+        if is_suited_key:
+            key2 = f"{suit}_{value + 1}"
+            key3 = f"{suit}_{value + 2}"
+            index2 = BASE_KEY_INDEX.get(key2, -1)
+            index3 = BASE_KEY_INDEX.get(key3, -1)
+            if value <= 7 and counts[index2] > 0 and counts[index3] > 0:
+                counts[index] -= 1
+                counts[index2] -= 1
+                counts[index3] -= 1
+                dfs(melds + 1, taatsu, pairs)
+                counts[index] += 1
+                counts[index2] += 1
+                counts[index3] += 1
+
+        if counts[index] >= 2:
+            counts[index] -= 2
+            dfs(melds, taatsu, pairs + 1)
+            counts[index] += 2
+
+        if is_suited_key:
+            for offset in (1, 2):
+                other_value = value + offset
+                other_key = f"{suit}_{other_value}"
+                if other_value <= 9 and other_key in BASE_KEY_INDEX:
+                    other_index = BASE_KEY_INDEX[other_key]
+                    if counts[other_index] <= 0:
+                        continue
+                    counts[index] -= 1
+                    counts[other_index] -= 1
+                    dfs(melds, taatsu + 1, pairs)
+                    counts[index] += 1
+                    counts[other_index] += 1
+
+        counts[index] -= 1
+        dfs(melds, taatsu, pairs)
+        counts[index] += 1
+
+    dfs(0, 0, 0)
+    return max(-1, best)
+
+
+def remove_one_tile_instance(tiles: list[Tile], discarded_tile: Tile) -> list[Tile]:
+    remaining = list(tiles)
+    for index, tile in enumerate(remaining):
+        if tile is discarded_tile:
+            remaining.pop(index)
+            return remaining
+    for index, tile in enumerate(remaining):
+        if tile.base_key == discarded_tile.base_key:
+            remaining.pop(index)
+            return remaining
+    return remaining
 
 
 def inefficient_tiles_for_completion(state: HandState) -> list[Tile]:
@@ -758,9 +1560,12 @@ def inefficient_tiles_for_completion(state: HandState) -> list[Tile]:
         return []
 
     counts = canonical_counter(tiles)
+    dora_keys = dora_base_keys(state)
     weak_tiles: list[Tile] = []
     for tile in tiles:
         if tile.red:
+            continue
+        if tile.base_key in dora_keys:
             continue
         if counts[tile.base_key] >= 2:
             continue
@@ -773,6 +1578,139 @@ def inefficient_tiles_for_completion(state: HandState) -> list[Tile]:
     return weak_tiles
 
 
+def ranked_discard_candidates(state: HandState, plans: list[YakuPlan]) -> list[Tile]:
+    tiles = list(state.hand_tiles)
+    if not tiles:
+        return []
+
+    counts = canonical_counter(tiles)
+    useful_keys = set().union(*(set(plan.useful_keys) for plan in plans)) if plans else set()
+    useful_plan_count = Counter(key for plan in plans for key in plan.useful_keys)
+    dora_keys = dora_base_keys(state)
+    non_dora_exists = any(tile.base_key not in dora_keys for tile in tiles)
+    non_red_exists = any(not tile.red for tile in tiles)
+    scored: list[tuple[int, int, Tile]] = []
+
+    for index, tile in enumerate(tiles):
+        score = 0
+        if tile.red and non_red_exists:
+            score -= 80
+        if tile.base_key in dora_keys and non_dora_exists:
+            score -= 70
+        if useful_keys and tile.base_key not in useful_keys:
+            score += 45
+        else:
+            score -= 8 * useful_plan_count[tile.base_key]
+
+        if tile.is_honor:
+            score += 28
+            if counts[tile.base_key] >= 2:
+                score -= 55
+        elif tile.is_suited:
+            if not suited_tile_has_connection(tile, counts):
+                score += 30
+            if tile.is_terminal:
+                score += 4
+
+        if counts[tile.base_key] >= 2:
+            score -= 24
+        if counts[tile.base_key] >= 3:
+            score -= 18
+
+        score -= discard_future_score(state, tile) // 4
+        score -= furiten_discard_penalty(state, tile)
+
+        scored.append((score, -index, tile))
+
+    if not scored:
+        return []
+
+    scored.sort(reverse=True)
+    best_score = scored[0][0]
+    return [tile for score, _index, tile in scored if score >= best_score - 6][:4]
+
+
+def sort_discard_candidates_by_badness(state: HandState, candidates: list[Tile], plans: list[YakuPlan]) -> list[Tile]:
+    if not candidates:
+        return []
+
+    hand_index = {id(tile): index for index, tile in enumerate(state.hand_tiles)}
+    counts = canonical_counter(state.hand_tiles)
+    useful_keys = set().union(*(set(plan.useful_keys) for plan in plans)) if plans else set()
+    useful_plan_count = Counter(key for plan in plans for key in plan.useful_keys)
+    dora_keys = dora_base_keys(state)
+    non_dora_exists = any(tile.base_key not in dora_keys for tile in state.hand_tiles)
+    non_red_exists = any(not tile.red for tile in state.hand_tiles)
+    scored: list[tuple[int, int, Tile]] = []
+
+    for tile in candidates:
+        index = hand_index.get(id(tile), len(state.hand_tiles))
+        score = 0
+        if tile.red and non_red_exists:
+            score -= 80
+        if tile.base_key in dora_keys and non_dora_exists:
+            score -= 70
+        if useful_keys and tile.base_key not in useful_keys:
+            score += 45
+        else:
+            score -= 8 * useful_plan_count[tile.base_key]
+
+        if tile.is_honor:
+            score += 28
+            if counts[tile.base_key] >= 2:
+                score -= 55
+        elif tile.is_suited:
+            if not suited_tile_has_connection(tile, counts):
+                score += 30
+            if tile.is_terminal:
+                score += 4
+
+        if counts[tile.base_key] >= 2:
+            score -= 24
+        if counts[tile.base_key] >= 3:
+            score -= 18
+
+        score -= discard_future_score(state, tile) // 4
+        score -= furiten_discard_penalty(state, tile)
+
+        scored.append((score, -index, tile))
+
+    scored.sort(reverse=True)
+    return [tile for _score, _index, tile in scored]
+
+
+def discard_future_score(state: HandState, discarded_tile: Tile) -> int:
+    remaining = list(state.hand_tiles)
+    for index, tile in enumerate(remaining):
+        if tile is discarded_tile:
+            remaining.pop(index)
+            break
+    else:
+        for index, tile in enumerate(remaining):
+            if tile.base_key == discarded_tile.base_key:
+                remaining.pop(index)
+                break
+
+    simulated = HandState(
+        hand_tiles=remaining,
+        open_melds=list(state.open_melds),
+        likely_yaku=[],
+        discarded_tiles=state.discarded_tiles,
+        discarded_by_player=state.discarded_by_player,
+        opponent_open_tiles=state.opponent_open_tiles,
+        dora_indicators=state.dora_indicators,
+        player_winds=state.player_winds,
+    )
+    simulated.refresh_missing_count()
+    plans = top_yaku_plans(simulated, limit=4)
+    if not plans:
+        return 0
+
+    best = plans[0].confidence
+    support = sum(plan.confidence for plan in plans[1:4]) // 6
+    return max(0, min(100, best + support))
+
+
 def suited_tile_has_connection(tile: Tile, counts: Counter[str]) -> bool:
     if not tile.is_suited:
         return False
@@ -780,3 +1718,13 @@ def suited_tile_has_connection(tile: Tile, counts: Counter[str]) -> bool:
     suit = tile.suit
     neighbor_offsets = (-2, -1, 1, 2)
     return any(1 <= value + offset <= 9 and counts[f"{suit}_{value + offset}"] > 0 for offset in neighbor_offsets)
+
+
+def pon_options_for_hand(hand_tiles: list[Tile], discarded_tile: Tile | None, source_player: str | None) -> list[PonOption]:
+    if discarded_tile is None or source_player in (None, "principal"):
+        return []
+
+    matching = [tile for tile in hand_tiles if tile.base_key == discarded_tile.base_key]
+    if len(matching) < 2:
+        return []
+    return [PonOption(discarded_tile, source_player, tuple(matching[:2]))]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ultralytics import YOLO
+from ultralytics import RTDETR, YOLO
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
         default=str(ROOT / "dataset" / "raw"),
         help="Imagem, pasta de imagens ou video para testar.",
     )
-    parser.add_argument("--imgsz", type=int, default=960)
+    parser.add_argument("--imgsz", type=int, default=1600)
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--device", default="0")
     return parser.parse_args()
@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    model = YOLO(args.weights)
+    model = RTDETR(args.weights) if "rtdetr" in args.weights.lower() else YOLO(args.weights)
     model.predict(
         source=args.source,
         imgsz=args.imgsz,
