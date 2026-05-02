@@ -154,44 +154,41 @@ O overlay desenha as bounding boxes e labels diretamente na preview da janela mo
 A primeira camada de leitura de jogo tenta identificar sua mao, chamadas abertas e yakus provaveis.
 Detalhes da arquitetura e limitacoes estao em [`docs/game_logic.md`](docs/game_logic.md).
 
-### 6. Treinar no Google Colab
+### 6. Treinar pelo notebook com interface
 
-Gere um pacote do dataset local:
-
-```powershell
-python scripts/prepare_colab_package.py
-```
-
-Isso cria:
-
-```text
-colab_packages/mahjongmaster_colab_dataset.zip
-```
-
-No Google Drive, crie a pasta:
-
-```text
-MyDrive/MahjongMaster
-```
-
-Envie o `.zip` para essa pasta. Depois abra:
+Abra:
 
 ```text
 notebooks/train_colab.ipynb
 ```
 
-No Colab:
+O notebook tem dropdowns e botoes para escolher modelo, device, epocas, imagem,
+batch, patience, nome do treino, verificar dataset, instalar dependencias,
+iniciar/parar treino e abrir TensorBoard.
 
-1. Use **Runtime > Change runtime type > GPU**.
-2. Rode as celulas em ordem.
-3. Se ainda nao enviou o pacote ao Drive, use a celula **Upload do dataset** no proprio notebook.
-4. Rode a celula **TensorBoard** antes do treino para monitorar losses, metricas, matriz de confusao e imagens geradas.
-5. Ajuste `MODEL`, `EPOCHS`, `IMGSZ`, `BATCH` e `PATIENCE` na celula de treino.
+Ele nao usa Google Drive. Para pegar automaticamente o dataset deste workspace,
+rode o notebook pelo VSCode/Jupyter local ou use o Google Colab conectado a um
+runtime local. Um runtime remoto do Colab nao consegue ler `C:/Codes/MahjongMaster`
+direto do seu PC.
 
-O resultado volta para:
+No notebook:
+
+1. Rode as celulas em ordem.
+2. Confira se **Workspace** aponta para a pasta do projeto.
+3. Clique **Verificar dataset**.
+4. Se necessario, clique **Instalar deps**.
+5. Escolha as configs e clique **Iniciar treino**.
+
+O treino usa:
 
 ```text
-MyDrive/MahjongMaster/runs/detect/<nome_do_treino>
+dataset/images/train
+dataset/images/val
+dataset/images/test
 ```
 
-Baixe ou copie o `weights/best.pt` para `runs/detect` local se quiser usar no predict do app.
+O resultado fica em:
+
+```text
+runs/detect/<nome_do_treino>
+```

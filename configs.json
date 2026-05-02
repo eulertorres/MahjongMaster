@@ -7,10 +7,10 @@
   "capture_mode_enabled": false,
   "routines_enabled": false,
   "auto_mouse_delay_min": 0.30000000000000004,
-  "auto_mouse_delay_max": 0.5,
-  "auto_click_delay_min": 0.4,
-  "auto_click_delay_max": 0.5,
-  "auto_call_settle_seconds": 0.9999999999999992,
+  "auto_mouse_delay_max": 0.4,
+  "auto_click_delay_min": 0.3,
+  "auto_click_delay_max": 0.30000000000000004,
+  "auto_call_settle_seconds": 1.2000000000000002,
   "pixel_probes": {
     "turn_left": {
       "label": "Vez esquerda",
