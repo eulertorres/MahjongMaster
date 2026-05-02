@@ -10,6 +10,7 @@ from mahjong_master.mahjong_logic import (
     call_decisions_for_state,
     chii_options_for_hand,
     classify_meld,
+    inferred_value_pon_options,
     kan_options_for_hand,
     likely_yaku,
     pon_options_for_hand,
@@ -93,6 +94,15 @@ class GameAnalyzer:
                     open_melds.append(classify_meld(tiles))
                 else:
                     open_melds.append(Meld(MeldKind.UNKNOWN, tuple(sort_tiles(tiles))))
+        if not hand_tiles:
+            recovered_hand = self.recover_hand_from_unknown_melds(open_melds)
+            if recovered_hand:
+                hand_tiles = recovered_hand
+                open_melds = [
+                    meld
+                    for meld in open_melds
+                    if not (meld.kind == MeldKind.UNKNOWN and len(meld.tiles) >= 8)
+                ]
 
         discarded_by_player = {}
         for player, player_detections in discarded_detections_by_player.items():
@@ -124,6 +134,11 @@ class GameAnalyzer:
         pon_source_player = resolved_call_source if resolved_call_source != "principal" else None
         pon_option_source = pon_source_player
         pon_discard = call_discard if pon_source_player else None
+        pon_options = pon_options_for_hand(hand_tiles, pon_discard, pon_option_source) if pon_button_visible else []
+        if pon_button_visible and not pon_options:
+            pon_options = inferred_value_pon_options(hand_tiles, pon_option_source, player_winds)
+            if pon_options:
+                pon_discard = pon_options[0].discarded_tile
 
         state = HandState(
             hand_tiles=hand_tiles,
@@ -138,7 +153,7 @@ class GameAnalyzer:
             pon_button_visible=pon_button_visible,
             pon_source_player=pon_option_source,
             pon_discard=pon_discard,
-            pon_options=pon_options_for_hand(hand_tiles, pon_discard, pon_option_source) if pon_button_visible else [],
+            pon_options=pon_options,
             kan_button_visible=kan_button_visible,
             kan_options=kan_options_for_hand(hand_tiles, pon_discard, pon_option_source) if kan_button_visible else [],
             dora_indicators=[
@@ -151,6 +166,13 @@ class GameAnalyzer:
         state.likely_yaku = likely_yaku(state)
         state.call_decisions = call_decisions_for_state(state)
         return state
+
+    @staticmethod
+    def recover_hand_from_unknown_melds(open_melds: list[Meld]) -> list:
+        for meld in open_melds:
+            if meld.kind == MeldKind.UNKNOWN and len(meld.tiles) >= 8:
+                return list(sort_tiles(meld.tiles))
+        return []
 
     def opponent_open_tiles(self, detections: list[TileDetection]) -> dict[str, list]:
         region_keys = {
@@ -236,6 +258,9 @@ class GameAnalyzer:
             for detection in detections
             if not detection.y1 <= line_y <= detection.y2
         ]
+        open_groups = self.horizontal_groups(open_tiles)
+        if len(detections) >= 8 and len(hand_group) < 3 and not any(self.classify_call_group(group) for group in open_groups):
+            return self.split_hand_and_calls(self.horizontal_groups(detections))
         return sorted(hand_group, key=lambda item: item.center_x), self.horizontal_groups(open_tiles)
 
     def plausible_open_call_items(

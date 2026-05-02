@@ -159,6 +159,8 @@ class AnnotationView(QGraphicsView):
         self.draft_item: QGraphicsRectItem | None = None
         self.click_handler = None
         self.double_click_handler = None
+        self.mouse4_handler = None
+        self.mouse5_handler = None
 
     def load_pixmap(self, pixmap: QPixmap) -> None:
         self.scene().clear()
@@ -173,6 +175,16 @@ class AnnotationView(QGraphicsView):
             self.fitInView(self.image_rect, Qt.AspectRatioMode.KeepAspectRatio)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if is_mouse_4(event.button()):
+            if self.mouse4_handler is not None:
+                self.mouse4_handler()
+                event.accept()
+                return
+        if is_mouse_5(event.button()):
+            if self.mouse5_handler is not None:
+                self.mouse5_handler()
+                event.accept()
+                return
         if event.button() != Qt.MouseButton.LeftButton or self.image_rect.isNull():
             super().mousePressEvent(event)
             return
@@ -249,6 +261,14 @@ class AnnotationView(QGraphicsView):
         return pos if self.image_rect.contains(pos) else None
 
 
+def is_mouse_4(button: Qt.MouseButton) -> bool:
+    return button in {Qt.MouseButton.BackButton, Qt.MouseButton.ExtraButton1, Qt.MouseButton.XButton1}
+
+
+def is_mouse_5(button: Qt.MouseButton) -> bool:
+    return button in {Qt.MouseButton.ForwardButton, Qt.MouseButton.ExtraButton2, Qt.MouseButton.XButton2}
+
+
 class AnnotatorWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -287,6 +307,8 @@ class AnnotatorWindow(QMainWindow):
         self.view = AnnotationView()
         self.view.click_handler = self.handle_image_click
         self.view.double_click_handler = self.handle_image_double_click
+        self.view.mouse4_handler = self.detect_boxes_for_current_mode
+        self.view.mouse5_handler = self.save_current
         self.view.box_created.connect(self.add_annotation)
         self.view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -294,6 +316,7 @@ class AnnotatorWindow(QMainWindow):
         self.helper_mode_combo.addItem("Manual", "manual")
         self.helper_mode_combo.addItem("Box-helper", "box_helper")
         self.helper_mode_combo.addItem("Predizer e revisar", "predict_review")
+        self.helper_mode_combo.setCurrentIndex(self.helper_mode_combo.findData("predict_review"))
         self.helper_mode_combo.currentIndexChanged.connect(self.annotation_mode_changed)
 
         self.model_combo = QComboBox()
@@ -407,6 +430,17 @@ class AnnotatorWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"Nenhuma imagem encontrada em {RAW_DATASET_DIR}")
 
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if is_mouse_4(event.button()):
+            self.detect_boxes_for_current_mode()
+            event.accept()
+            return
+        if is_mouse_5(event.button()):
+            self.save_current()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
     def shortcut_actions(self) -> dict[str, tuple[str, str, object]]:
         actions = {
             "select_man": ("Man", "A", lambda: self.select_suit("man")),
@@ -430,7 +464,6 @@ class AnnotatorWindow(QMainWindow):
             "select_dragon_red": ("Red", "I", lambda: self.select_honor("dragon_red")),
             "select_tile_back": ("Virada", "V", lambda: self.select_honor("tile_back")),
             "select_red_five": ("5 vermelho", "R", self.select_red_five),
-            "save": ("Salvar", "Return", self.save_current),
             "delete": ("Remover box", "Delete", self.delete_selected),
             "undo": ("Desfazer", "Ctrl+Z", self.undo_last),
             "previous_image": ("Imagem anterior", "Z", self.previous_image),
@@ -451,6 +484,12 @@ class AnnotatorWindow(QMainWindow):
         form.setContentsMargins(6, 8, 6, 6)
         form.setHorizontalSpacing(6)
         form.setVerticalSpacing(3)
+        detect_label = QLabel("Mouse 4")
+        detect_label.setStyleSheet("QLabel { color: #93C5FD; font-weight: 700; }")
+        save_label = QLabel("Mouse 5")
+        save_label.setStyleSheet("QLabel { color: #93C5FD; font-weight: 700; }")
+        form.addRow("Detectar boxes", detect_label)
+        form.addRow("Salvar", save_label)
 
         for action_id, (label, default, _callback) in self.shortcut_actions().items():
             edit = QKeySequenceEdit(QKeySequence(self.shortcut_config.get(action_id, default)))

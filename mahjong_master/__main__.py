@@ -55,6 +55,8 @@ from mahjong_master.mahjong_logic import (
     Tile,
     call_candidate_plans,
     call_plan_score_from_plans,
+    estimated_hand_value,
+    hand_completion_progress,
     likely_yaku,
     simulate_call,
     tile_from_name,
@@ -583,12 +585,18 @@ class RegionConfigDialog(QDialog):
             self.probe_combo.addItem(f"{probe['label']} ({key})", key)
         self.probe_combo.currentIndexChanged.connect(self.load_selected_probe)
         self.probe_combo.setMinimumContentsLength(18)
+        self.probe_combo.setMaxVisibleItems(12)
+        self.probe_combo.view().setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.probe_enabled_checkbox = QCheckBox("Ativo")
         self.probe_x_input = self.region_spinbox(CAPTURE_WIDTH)
         self.probe_y_input = self.region_spinbox(CAPTURE_HEIGHT)
         self.probe_tolerance_input = self.region_spinbox(255)
         self.probe_color_label = QLabel("-")
         self.probe_color_label.setMinimumWidth(78)
+        self.probe_mode_combo = QComboBox()
+        self.probe_mode_combo.addItem("Cor igual", "match")
+        self.probe_mode_combo.addItem("Cor diferente", "not_match")
+        self.probe_mode_combo.setFixedWidth(118)
 
         self.area_mode_button = QPushButton("Editar area")
         self.area_mode_button.setCheckable(True)
@@ -643,6 +651,7 @@ class RegionConfigDialog(QDialog):
         controls_grid.addWidget(self.probe_color_label, 1, 10)
         controls_grid.addWidget(QLabel("Tol"), 1, 11)
         controls_grid.addWidget(self.probe_tolerance_input, 1, 12)
+        controls_grid.addWidget(self.probe_mode_combo, 1, 13)
         controls_grid.setColumnStretch(1, 1)
         controls_grid.setColumnStretch(2, 1)
         controls_grid.setColumnStretch(3, 1)
@@ -715,6 +724,8 @@ class RegionConfigDialog(QDialog):
         self.probe_x_input.setValue(int(probe["x"]))
         self.probe_y_input.setValue(int(probe["y"]))
         self.probe_tolerance_input.setValue(int(probe.get("tolerance", 45)))
+        mode_index = self.probe_mode_combo.findData(str(probe.get("mode", "match")))
+        self.probe_mode_combo.setCurrentIndex(max(0, mode_index))
         self.set_probe_color_label(str(probe.get("color", "#FBBF24")))
         if self.edit_mode == "probe":
             self.editor_view.select_probe_key(self.current_probe_key)
@@ -741,6 +752,7 @@ class RegionConfigDialog(QDialog):
         probe["x"] = self.probe_x_input.value()
         probe["y"] = self.probe_y_input.value()
         probe["tolerance"] = self.probe_tolerance_input.value()
+        probe["mode"] = self.probe_mode_combo.currentData() or "match"
         self.editor_view.update_probe_from_config(self.current_probe_key)
         save_config(CONFIG_PATH, self.config)
         if self.parent() and hasattr(self.parent(), "capture_once"):
@@ -817,6 +829,7 @@ class RegionConfigDialog(QDialog):
         self.probe_combo.clear()
         for key, probe in self.config.get("pixel_probes", {}).items():
             self.probe_combo.addItem(f"{probe['label']} ({key})", key)
+        self.probe_combo.setMaxVisibleItems(12)
         self.probe_combo.blockSignals(False)
         self.editor_view.reload_regions()
         self.load_selected_region()
@@ -860,6 +873,9 @@ class MainWindow(QMainWindow):
         self.auto_decision_log_last_signature = ""
         self.auto_decision_log_events = 0
         self.auto_no_hand_frames = 0
+        self.routine_step_index: dict[str, int] = {}
+        self.routine_last_click_at: dict[str, float] = {}
+        self.routine_click_pending = False
         self.latest_auto_image: QImage | None = None
         self.latest_auto_detections: list = []
         self.latest_auto_state: HandState | None = None
@@ -938,6 +954,11 @@ class MainWindow(QMainWindow):
         self.capture_mode_checkbox.setToolTip("Salva screenshot automaticamente a cada 3 minutos.")
         self.capture_mode_checkbox.setChecked(bool(self.app_config.get("capture_mode_enabled", False)))
         self.capture_mode_checkbox.stateChanged.connect(self.capture_mode_changed)
+
+        self.routines_checkbox = QCheckBox("Rot")
+        self.routines_checkbox.setToolTip("Executa rotinas por triggers de pixel configurados.")
+        self.routines_checkbox.setChecked(bool(self.app_config.get("routines_enabled", False)))
+        self.routines_checkbox.stateChanged.connect(self.routines_mode_changed)
 
         self.debug_checkbox = QCheckBox("Dbg")
         self.debug_checkbox.setChecked(bool(self.app_config.get("debug_enabled", False)))
@@ -1040,11 +1061,12 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.refresh_button)
         controls.addWidget(QLabel("Mod:"))
         controls.addWidget(self.model_combo, stretch=4)
-        controls.addWidget(self.predict_checkbox)
-        controls.addWidget(self.auto_play_checkbox)
-        controls.addWidget(self.preview_checkbox)
-        controls.addWidget(self.capture_mode_checkbox)
-        controls.addWidget(self.show_regions_checkbox)
+        controls.addWidget(self.mode_control(self.predict_checkbox, "Ctrl+P"))
+        controls.addWidget(self.mode_control(self.auto_play_checkbox, "Tab"))
+        controls.addWidget(self.mode_control(self.preview_checkbox, "Ctrl+V"))
+        controls.addWidget(self.mode_control(self.capture_mode_checkbox, "Ctrl+K"))
+        controls.addWidget(self.mode_control(self.routines_checkbox, "Ctrl+R"))
+        controls.addWidget(self.mode_control(self.show_regions_checkbox, "Ctrl+L"))
         controls.addWidget(self.options_button)
         controls.addWidget(self.annotator_button)
         controls.addWidget(self.training_button)
@@ -1089,6 +1111,18 @@ class MainWindow(QMainWindow):
         self.set_game_summary(self.last_game_summary)
         self.debug_setting_changed()
         self.log_debug("App iniciado.")
+
+    def mode_control(self, checkbox: QCheckBox, shortcut: str) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(checkbox, alignment=Qt.AlignmentFlag.AlignHCenter)
+        label = QLabel(shortcut)
+        label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        label.setStyleSheet("QLabel { color: #94A3B8; font-size: 9px; margin-top: -3px; }")
+        layout.addWidget(label)
+        return container
 
     def build_options_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -1156,18 +1190,30 @@ class MainWindow(QMainWindow):
 
     def set_game_summary(self, summary: str) -> None:
         self.last_game_summary = summary
+        scroll_value = self.game_summary_log.verticalScrollBar().value()
         self.game_summary_log.setHtml(
             "<html><body style='background:#0B1220;color:#E5E7EB;font-family:Segoe UI,Arial,sans-serif;'>"
             f"<pre style='white-space:pre-wrap;font-size:12px;'>{escape(summary)}</pre>"
             "</body></html>"
         )
+        self.restore_summary_scroll(scroll_value)
         self.game_summary_log.repaint()
 
     def set_game_summary_state(self, state: HandState) -> None:
         summary = state.summary()
         self.last_game_summary = summary
+        scroll_bar = self.game_summary_log.verticalScrollBar()
+        scroll_value = scroll_bar.value()
         self.game_summary_log.setHtml(self.game_summary_html(state))
+        self.restore_summary_scroll(scroll_value)
         self.game_summary_log.repaint()
+
+    def restore_summary_scroll(self, value: int) -> None:
+        def apply_scroll() -> None:
+            scroll_bar = self.game_summary_log.verticalScrollBar()
+            scroll_bar.setValue(min(value, scroll_bar.maximum()))
+
+        QTimer.singleShot(0, apply_scroll)
 
     def game_summary_html(self, state: HandState) -> str:
         dora = "".join(self.tile_chip(tile) for tile in state.dora_tiles[:5]) or self.empty_chip("-")
@@ -1182,9 +1228,13 @@ class MainWindow(QMainWindow):
         if not discard_cards:
             discard_cards = "<div class='muted'>Ainda sem descarte recomendado.</div>"
         furiten_box = self.furiten_box(state)
+        progress_box = self.progress_box(state)
+        value_box = self.value_box(state)
         calls = "".join(self.call_chip(decision) for decision in state.call_decisions)
         if not calls and not (state.chii_button_visible or state.pon_button_visible or state.kan_button_visible):
             calls = "<div class='muted'>Nenhum botao de chamada ativo.</div>"
+        discarded_seen = self.discarded_seen_box(state)
+        signals = self.signals_box(state)
 
         winds = " ".join(
             f"<span class='pill'>{label}: {escape(str(state.player_winds.get(player, '?')))}</span>"
@@ -1202,24 +1252,27 @@ class MainWindow(QMainWindow):
         <head>
         <style>
             body {{ margin:0; background:#0B1220; color:#D7DEE9; font-family:'Segoe UI', Arial, sans-serif; }}
-            .wrap {{ padding:8px; }}
-            .top {{ margin-bottom:8px; }}
-            .pill {{ background:#101826; border:1px solid #2A3648; border-radius:4px; padding:3px 7px; color:#C8D1DF; }}
-            .panel {{ background:#111827; border:1px solid #1F2937; border-radius:6px; padding:8px; }}
-            .cell {{ vertical-align:top; width:50%; }}
-            .title {{ color:#F3F6FB; font-size:12px; font-weight:700; margin-bottom:6px; }}
+            .wrap {{ padding:4px; overflow:hidden; }}
+            .top {{ margin-bottom:4px; font-size:11px; }}
+            .pill {{ background:#101826; border:1px solid #2A3648; border-radius:3px; padding:1px 4px; color:#C8D1DF; }}
+            .panel {{ background:#111827; border:1px solid #1F2937; border-radius:4px; padding:5px; margin-bottom:4px; }}
+            .grid {{ width:100%; table-layout:fixed; }}
+            .cell {{ vertical-align:top; width:50%; overflow:hidden; }}
+            .title {{ color:#F3F6FB; font-size:12px; font-weight:700; margin-bottom:3px; }}
             .muted {{ color:#94A3B8; font-size:11px; }}
-            .warn {{ background:#172033; padding:6px 8px; margin-bottom:8px; color:#E9DFA8; }}
-            .tile {{ background:#101826; border:1px solid #334155; border-radius:4px; padding:2px 5px; font-weight:700; white-space:nowrap; }}
-            .empty {{ color:#94A3B8; border:1px dashed #475569; border-radius:4px; padding:2px 5px; white-space:nowrap; }}
-            .meld {{ background:#0F172A; border:1px solid #334155; border-radius:4px; padding:4px 6px; }}
-            .discard {{ margin-bottom:8px; border:1px solid #334155; border-radius:6px; }}
-            .badge {{ font-size:10px; font-weight:800; padding:3px 6px; border-radius:4px; }}
+            .warn {{ background:#172033; padding:4px 6px; margin-bottom:4px; color:#E9DFA8; }}
+            .tile {{ display:inline-block; background:#101826; border:1px solid #334155; border-radius:3px; padding:1px 4px; margin:0 2px 2px 0; font-weight:700; white-space:nowrap; }}
+            .empty {{ display:inline-block; color:#94A3B8; border:1px dashed #475569; border-radius:3px; padding:1px 4px; margin:0 2px 2px 0; white-space:nowrap; }}
+            .meld {{ background:#0F172A; border:1px solid #334155; border-radius:3px; padding:2px 4px; }}
+            .discard {{ margin-bottom:5px; border:1px solid #334155; border-radius:4px; }}
+            .badge {{ font-size:10px; font-weight:800; padding:2px 4px; border-radius:3px; }}
             .badge.red {{ background:#3A1820; color:#FCA5A5; border:1px solid #7F1D1D; }}
             .badge.yellow {{ background:#332A14; color:#FDE68A; border:1px solid #854D0E; }}
-            .meter {{ height:7px; background:#1E293B; }}
-            .fill {{ height:7px; background:#D15E68; }}
-            .discard-body {{ padding:6px 8px; font-size:11px; color:#CBD5E1; }}
+            .meter {{ height:5px; background:#1E293B; }}
+            .fill {{ height:5px; background:#D15E68; }}
+            .score-box {{ margin-top:3px; padding:4px; background:#0F172A; border:1px solid #263447; border-radius:4px; }}
+            .score-main {{ color:#E7F0FF; font-weight:800; }}
+            .discard-body {{ padding:4px 6px; font-size:11px; color:#CBD5E1; }}
             .protect {{ color:#9DDBC5; }}
             .reason {{ color:#DFA3A3; }}
             .stat {{ color:#91B7E8; }}
@@ -1230,6 +1283,9 @@ class MainWindow(QMainWindow):
             .plan-score {{ color:#CFE3FF; font-weight:700; }}
             .need-row {{ border-bottom:1px solid #1F2937; }}
             .call {{ background:#0F172A; border:1px solid #334155; border-radius:5px; padding:5px 7px; }}
+            .mini-row {{ border-bottom:1px solid #1F2937; font-size:11px; }}
+            .ok {{ color:#86EFAC; font-weight:700; }}
+            .bad {{ color:#FCA5A5; font-weight:700; }}
         </style>
         </head>
         <body><div class='wrap'>
@@ -1240,14 +1296,18 @@ class MainWindow(QMainWindow):
                 <span class='pill'>Indic {indicators}</span>
             </div>
             {warning}
-            <table width='100%' cellspacing='6' cellpadding='0'>
+            <table class='grid' cellspacing='4' cellpadding='0'>
                 <tr>
-                    <td class='cell'><div class='panel'><div class='title'>Mao</div>{hand_tiles}<div class='title' style='margin-top:8px;'>Abertas</div>{melds}</div></td>
-                    <td class='cell'><div class='panel'><div class='title'>Planos ativos</div>{yaku_cards}</div></td>
-                </tr>
-                <tr>
-                    <td class='cell'><div class='panel'><div class='title'>Descartes marcados no overlay</div>{furiten_box}{discard_cards}</div></td>
-                    <td class='cell'><div class='panel'><div class='title'>Pecas que ajudam</div>{needs}<div class='title' style='margin-top:8px;'>Chamadas</div>{calls}</div></td>
+                    <td class='cell'>
+                        <div class='panel'><div class='title'>Mao</div>{hand_tiles}<div class='title' style='margin-top:5px;'>Abertas</div>{melds}</div>
+                        <div class='panel'><div class='title'>Descartes detectados</div>{discarded_seen}</div>
+                        <div class='panel'><div class='title'>Descartes marcados no overlay</div>{furiten_box}{discard_cards}</div>
+                    </td>
+                    <td class='cell'>
+                        <div class='panel'>{progress_box}{value_box}<div class='title' style='margin-top:5px;'>Planos ativos</div>{yaku_cards}</div>
+                        <div class='panel'><div class='title'>Pecas que ajudam</div>{needs}</div>
+                        <div class='panel'><div class='title'>Sinais</div>{signals}<div class='title' style='margin-top:5px;'>Chamadas</div>{calls}</div>
+                    </td>
                 </tr>
             </table>
         </div></body></html>
@@ -1287,6 +1347,45 @@ class MainWindow(QMainWindow):
             )
         return "<table width='100%' cellspacing='0' cellpadding='1'>" + "".join(rows) + "</table>"
 
+    def progress_box(self, state: HandState) -> str:
+        progress = hand_completion_progress(state)
+        return (
+            "<table width='100%' cellspacing='0' cellpadding='0'><tr>"
+            "<td width='92'><b>Ron/Tsumo</b></td>"
+            f"<td>{self.segmented_progress_bar(progress.percent)}</td>"
+            f"<td width='78' align='right'><b>{progress.percent}%</b> <span class='muted'>{escape(progress.label)}</span></td>"
+            "</tr></table>"
+        )
+
+    def segmented_progress_bar(self, percent: int) -> str:
+        total = 20
+        filled = max(0, min(total, round(total * max(0, min(100, int(percent))) / 100)))
+        cells = []
+        for index in range(total):
+            color = "#38BDF8" if index < filled else "#1E293B"
+            cells.append(f"<td bgcolor='{color}' width='5%' height='8'></td>")
+        return "<table width='100%' cellspacing='1' cellpadding='0'><tr>" + "".join(cells) + "</tr></table>"
+
+    def value_box(self, state: HandState) -> str:
+        value = estimated_hand_value(state)
+        yakus = ", ".join(f"{name} {han}h" for name, han in value.yakus) or "sem yaku confirmado"
+        bonuses = ", ".join(f"{name} +{han}" for name, han in value.bonus_items)
+        bonus_text = f" | Bonus: {escape(bonuses)}" if bonuses else ""
+        if value.ron_points <= 0:
+            points = "<span class='muted'>sem yaku confirmado</span>"
+        else:
+            limit = f" {value.limit_name}" if value.limit_name else ""
+            points = (
+                f"<span class='score-main'>{value.han} han / {value.fu} fu{escape(limit)}</span>"
+                f" | Ron {value.ron_points} | Tsumo {escape(value.tsumo_points)}"
+            )
+        return (
+            "<div class='score-box'>"
+            f"<div><b>Valor</b>: {points}</div>"
+            f"<div class='muted'>Yakus: {escape(yakus)}{bonus_text}</div>"
+            "</div>"
+        )
+
     def needs_table(self, needs) -> str:
         if not needs:
             return self.empty_chip("-")
@@ -1307,6 +1406,76 @@ class MainWindow(QMainWindow):
         current = "".join(
             f"<div class='reason'>Atual: {self.tile_chip(need.tile)} {escape(need.reason)}</div>"
             for need in state.current_furiten_waits
+        )
+
+    def discarded_seen_box(self, state: HandState) -> str:
+        rows = []
+        labels = {
+            "principal": "Voce",
+            "esquerda": "Esq",
+            "cima": "Cima",
+            "direita": "Dir",
+        }
+        for player in ("principal", "esquerda", "cima", "direita"):
+            tiles = state.discarded_by_player.get(player, [])
+            chips = "".join(self.tile_chip(tile) for tile in tiles[-12:]) or self.empty_chip("-")
+            rows.append(
+                "<tr class='mini-row'>"
+                f"<td width='48'><b>{labels[player]}</b></td>"
+                f"<td>{chips}</td>"
+                f"<td width='28' align='right' class='muted'>{len(tiles)}</td>"
+                "</tr>"
+            )
+        total = sum(len(tiles) for tiles in state.discarded_by_player.values())
+        return (
+            f"<div class='muted' style='margin-bottom:3px;'>Total detectado: {total}</div>"
+            "<table width='100%' cellspacing='0' cellpadding='2'>"
+            + "".join(rows)
+            + "</table>"
+        )
+
+    def signals_box(self, state: HandState) -> str:
+        actions = [
+            ("Chii", state.chii_button_visible),
+            ("Pon", state.pon_button_visible),
+            ("Kan", state.kan_button_visible),
+            ("Riichi", state.riichi_button_visible),
+            ("Ron/Tsumo", state.win_button_visible),
+        ]
+        action_rows = "".join(
+            "<tr class='mini-row'>"
+            f"<td>{escape(label)}</td>"
+            f"<td width='44' align='right' class='{'ok' if active else 'muted'}'>{'sim' if active else 'nao'}</td>"
+            "</tr>"
+            for label, active in actions
+        )
+
+        statuses = [
+            status
+            for status in self.pixel_trigger_statuses(self.last_capture)
+            if str(status.get("key", "")).startswith("riichi_stick")
+        ]
+        if statuses:
+            riichi_rows = "".join(
+                "<tr class='mini-row'>"
+                f"<td>{escape(str(status.get('label', status.get('key', 'Richi'))))}</td>"
+                f"<td width='44' align='right' class='{'ok' if status.get('positive') else 'muted'}'>"
+                f"{'sim' if status.get('positive') else 'nao'}</td>"
+                f"<td width='58' align='right' class='muted'>{escape(str(status.get('current_color', '-')))}</td>"
+                "</tr>"
+                for status in statuses
+            )
+        else:
+            riichi_rows = "<tr class='mini-row'><td colspan='3' class='muted'>Richi por pixel sem leitura ativa.</td></tr>"
+
+        return (
+            "<table width='100%' cellspacing='0' cellpadding='2'>"
+            + action_rows
+            + "</table>"
+            "<div class='title' style='margin-top:5px;'>Richi pixel</div>"
+            "<table width='100%' cellspacing='0' cellpadding='2'>"
+            + riichi_rows
+            + "</table>"
         )
         future = "".join(
             f"<div class='reason'>Risco: {self.tile_chip(need.tile)} {escape(need.reason)}</div>"
@@ -1375,9 +1544,14 @@ class MainWindow(QMainWindow):
         )
 
     def capture_once(self, *_args, force: bool = False) -> None:
-        if not force and not self.preview_checkbox.isChecked() and not self.predict_checkbox.isChecked():
+        if (
+            not force
+            and not self.preview_checkbox.isChecked()
+            and not self.predict_checkbox.isChecked()
+            and not self.routines_checkbox.isChecked()
+        ):
             self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("Preview desabilitado. Ative Preview ou Predict para monitorar.")
+            self.preview_label.setText("Preview desabilitado. Ative Preview, Predict ou Rot para monitorar.")
             self.refresh_debug_state()
             return
 
@@ -1432,6 +1606,7 @@ class MainWindow(QMainWindow):
         image = self.normalized_capture_image(image)
         self.last_capture = image
         self.capture_count += 1
+        self.handle_routines(image)
         display_image = self.predicted_image(image)
         if self.show_regions_checkbox.isChecked():
             display_image = display_image.copy()
@@ -1446,7 +1621,10 @@ class MainWindow(QMainWindow):
             self.preview_label.setPixmap(scaled)
         else:
             self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("Preview desabilitado. Predict continua rodando em segundo plano.")
+            if self.predict_checkbox.isChecked():
+                self.preview_label.setText("Preview desabilitado. Predict continua rodando em segundo plano.")
+            elif self.routines_checkbox.isChecked():
+                self.preview_label.setText("Preview desabilitado. Rotinas continuam monitorando em segundo plano.")
 
         if not self.predict_checkbox.isChecked():
             self.statusBar().showMessage(
@@ -1510,6 +1688,19 @@ class MainWindow(QMainWindow):
             self.toggle_auto_play()
             event.accept()
             return
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            toggles = {
+                Qt.Key.Key_P: self.predict_checkbox,
+                Qt.Key.Key_V: self.preview_checkbox,
+                Qt.Key.Key_K: self.capture_mode_checkbox,
+                Qt.Key.Key_R: self.routines_checkbox,
+                Qt.Key.Key_L: self.show_regions_checkbox,
+            }
+            checkbox = toggles.get(event.key())
+            if checkbox is not None:
+                checkbox.setChecked(not checkbox.isChecked())
+                event.accept()
+                return
         super().keyPressEvent(event)
 
     def predict_parameter_changed(self, *_args) -> None:
@@ -1582,6 +1773,19 @@ class MainWindow(QMainWindow):
         else:
             self.capture_timer.stop()
             self.log_debug("Modo captura desligado.")
+
+    def routines_mode_changed(self, *_args) -> None:
+        enabled = self.routines_checkbox.isChecked()
+        self.app_config["routines_enabled"] = enabled
+        save_config(CONFIG_PATH, self.app_config)
+        if enabled:
+            self.statusBar().showMessage("Rotinas ligadas: triggers de pixel ativos.")
+            self.log_debug("Rotinas ligadas.")
+            self.capture_once(force=True)
+        else:
+            self.routine_step_index.clear()
+            self.routine_click_pending = False
+            self.log_debug("Rotinas desligadas.")
 
     def refresh_model_list(self) -> None:
         current_path = self.selected_model_path()
@@ -1906,6 +2110,24 @@ class MainWindow(QMainWindow):
             "Riichi": riichi_button_visible,
             "Ron/Tsumo": win_button_visible,
         }
+        if state.missing_count and not win_button_visible:
+            visible_call_actions = [
+                action
+                for action in ("Kan", "Pon", "Chii")
+                if visible_actions[action]
+            ]
+            if visible_call_actions and self.click_skip_button(visible_call_actions):
+                actions_text = "/".join(visible_call_actions)
+                self.log_debug(f"Auto: leitura incompleta; {actions_text} ignorado com Skip.")
+                self.auto_last_click_at = time.perf_counter()
+                self.auto_turn_frames = 0
+                return
+            if not state.discard_candidates:
+                self.auto_turn_frames = 0
+                self.statusBar().showMessage(
+                    f"Auto: aguardando leitura melhor ({state.missing_count} peca(s) faltando)."
+                )
+                return
         recommended_actions = {
             decision.action
             for decision in state.call_decisions
@@ -2067,6 +2289,9 @@ class MainWindow(QMainWindow):
             "Ron/Tsumo": win_button_visible,
             "ChiiChoose": chii_choose_visible,
         }
+        inverse_probe_statuses = self.pixel_trigger_statuses(self.latest_auto_image or self.last_capture)
+        progress = hand_completion_progress(state)
+        value = estimated_hand_value(state)
         decisions = [decision.compact for decision in state.call_decisions]
         signature = "|".join(
             [
@@ -2090,6 +2315,28 @@ class MainWindow(QMainWindow):
                 "missing_count": state.missing_count,
                 "player_winds": state.player_winds,
                 "visible_actions": visible_actions,
+                "hand_progress": {
+                    "shanten": progress.shanten,
+                    "percent": progress.percent,
+                    "label": progress.label,
+                },
+                "estimated_value": {
+                    "han": value.han,
+                    "fu": value.fu,
+                    "yakus": [{"name": name, "han": han} for name, han in value.yakus],
+                    "bonus_han": value.bonus_han,
+                    "bonus_items": [{"name": name, "han": han} for name, han in value.bonus_items],
+                    "ron_points": value.ron_points,
+                    "tsumo_points": value.tsumo_points,
+                    "limit_name": value.limit_name,
+                    "dealer": value.dealer,
+                    "note": value.note,
+                },
+                "pixel_triggers": [
+                    status for status in inverse_probe_statuses if status.get("positive")
+                ],
+                "pixel_triggers_all": inverse_probe_statuses,
+                "routine_state": dict(self.routine_step_index),
                 "call_decisions": [
                     {
                         "action": decision.action,
@@ -2335,6 +2582,13 @@ class MainWindow(QMainWindow):
                 continue
             candidates.append(detection)
         if not candidates:
+            for detection in detections:
+                tile = tile_from_name(detection.name)
+                if tile is None or tile.base_key != target_key:
+                    continue
+                if player_region.contains(QPointF(detection.center_x, detection.center_y)):
+                    candidates.append(detection)
+        if not candidates:
             self.log_debug(f"Auto: nao encontrou box clicavel para {discard_tile.compact}.")
             return False
 
@@ -2373,23 +2627,10 @@ class MainWindow(QMainWindow):
     def click_normalized_point(self, x: float, y: float, context: dict | None = None) -> bool:
         if self.auto_click_pending:
             return False
-        hwnd = self.selected_hwnd()
-        if hwnd is None:
+        screen_point = self.normalized_point_to_screen(x, y)
+        if screen_point is None:
             return False
-        bounds = window_bounds(hwnd)
-        if bounds is None:
-            return False
-        monitor = clamp_to_monitor(bounds, self.screen_capture.monitors)
-        if monitor is None:
-            return False
-
-        scale = max(CAPTURE_WIDTH / monitor["width"], CAPTURE_HEIGHT / monitor["height"])
-        scaled_width = monitor["width"] * scale
-        scaled_height = monitor["height"] * scale
-        crop_x = max(0.0, (scaled_width - CAPTURE_WIDTH) / 2)
-        crop_y = max(0.0, (scaled_height - CAPTURE_HEIGHT) / 2)
-        screen_x = int(monitor["left"] + (x + crop_x) / scale)
-        screen_y = int(monitor["top"] + (y + crop_y) / scale)
+        hwnd, screen_x, screen_y = screen_point
 
         move_delay_seconds = random.uniform(*self.auto_mouse_delay_seconds)
         move_delay_ms = round(move_delay_seconds * 1000)
@@ -2401,6 +2642,110 @@ class MainWindow(QMainWindow):
             lambda: self.finish_scheduled_mouse_move(hwnd, screen_x, screen_y),
         )
         return True
+
+    def normalized_point_to_screen(self, x: float, y: float) -> tuple[int, int, int] | None:
+        hwnd = self.selected_hwnd()
+        if hwnd is None:
+            return None
+        bounds = window_bounds(hwnd)
+        if bounds is None:
+            return None
+        monitor = clamp_to_monitor(bounds, self.screen_capture.monitors)
+        if monitor is None:
+            return None
+
+        scale = max(CAPTURE_WIDTH / monitor["width"], CAPTURE_HEIGHT / monitor["height"])
+        scaled_width = monitor["width"] * scale
+        scaled_height = monitor["height"] * scale
+        crop_x = max(0.0, (scaled_width - CAPTURE_WIDTH) / 2)
+        crop_y = max(0.0, (scaled_height - CAPTURE_HEIGHT) / 2)
+        screen_x = int(monitor["left"] + (x + crop_x) / scale)
+        screen_y = int(monitor["top"] + (y + crop_y) / scale)
+        return hwnd, screen_x, screen_y
+
+    def handle_routines(self, image: QImage) -> None:
+        if not self.routines_checkbox.isChecked() or self.routine_click_pending:
+            return
+        routines = self.app_config.get("routines", {})
+        for routine_key, routine in routines.items():
+            if not routine.get("enabled", True):
+                continue
+            steps = routine.get("steps") or []
+            if not steps:
+                continue
+            index = min(self.routine_step_index.get(routine_key, 0), len(steps) - 1)
+            step = steps[index]
+            until_key = str(step.get("until") or "")
+            if until_key and self.probe_matches(image, until_key):
+                self.routine_step_index[routine_key] = index + 1
+                self.log_debug(f"Rotina {routine_key}: etapa {index + 1} concluida pelo trigger {until_key}.")
+                continue
+
+            trigger_key = str(step.get("trigger") or "")
+            if trigger_key and not self.probe_matches(image, trigger_key):
+                if index:
+                    self.routine_step_index[routine_key] = 0
+                continue
+
+            cooldown = float(routine.get("cooldown_seconds", 0.8))
+            now = time.perf_counter()
+            if now - self.routine_last_click_at.get(routine_key, 0.0) < cooldown:
+                continue
+            click_key = str(step.get("click") or trigger_key)
+            if self.click_routine_probe(click_key, routine_key, index):
+                self.routine_last_click_at[routine_key] = now
+                if not until_key:
+                    next_index = index + 1
+                    self.routine_step_index[routine_key] = 0 if next_index >= len(steps) else next_index
+                return
+
+    def click_routine_probe(self, probe_key: str, routine_key: str, step_index: int) -> bool:
+        probe = self.pixel_probe(probe_key)
+        if probe is None:
+            self.log_debug(f"Rotina {routine_key}: pixel {probe_key} desativado ou inexistente.")
+            return False
+        screen_point = self.normalized_point_to_screen(float(probe["x"]), float(probe["y"]))
+        if screen_point is None:
+            return False
+        hwnd, screen_x, screen_y = screen_point
+        self.routine_click_pending = True
+        label = probe.get("label", probe_key)
+        self.statusBar().showMessage(f"Rotina {routine_key}: clicando {label}.")
+        self.write_auto_decision_log(
+            {
+                "event": "routine_click_scheduled",
+                "routine": routine_key,
+                "step": step_index,
+                "probe": probe_key,
+                "label": label,
+            }
+        )
+        QTimer.singleShot(
+            80,
+            lambda: self.finish_routine_click(hwnd, screen_x, screen_y, routine_key, step_index, probe_key),
+        )
+        return True
+
+    def finish_routine_click(self, hwnd: int, screen_x: int, screen_y: int, routine_key: str, step_index: int, probe_key: str) -> None:
+        try:
+            if not self.routines_checkbox.isChecked():
+                return
+            user32.SetForegroundWindow(hwnd)
+            user32.SetCursorPos(screen_x, screen_y)
+            user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            self.statusBar().showMessage(f"Rotina {routine_key}: clique executado.")
+            self.log_debug(f"Rotina {routine_key}: clique etapa {step_index + 1} em {probe_key}.")
+            self.write_auto_decision_log(
+                {
+                    "event": "routine_click",
+                    "routine": routine_key,
+                    "step": step_index,
+                    "probe": probe_key,
+                }
+            )
+        finally:
+            self.routine_click_pending = False
 
     def finish_scheduled_mouse_move(self, hwnd: int, screen_x: int, screen_y: int) -> None:
         if not self.auto_play_checkbox.isChecked():
@@ -2448,6 +2793,12 @@ class MainWindow(QMainWindow):
                 self.auto_call_settle_until = self.auto_last_click_at + self.auto_call_settle_seconds
             if context.get("kind") == "chii_option":
                 self.auto_call_settle_until = self.auto_last_click_at + self.auto_call_settle_seconds
+            self.write_auto_decision_log(
+                {
+                    "event": "auto_click",
+                    "context": context,
+                }
+            )
             self.statusBar().showMessage("Auto: clique executado.")
             self.log_debug("Auto: clique executado apos atraso aleatorio.")
         finally:
@@ -2469,15 +2820,17 @@ class MainWindow(QMainWindow):
             if current_key != context.get("tile_key"):
                 return False
             player_region = self.configured_region_rect("player_hand")
+            any_target_in_region = False
             for detection in self.latest_auto_detections:
                 tile = tile_from_name(detection.name)
                 if tile is None or tile.base_key != current_key:
                     continue
                 if not player_region.contains(QPointF(detection.center_x, detection.center_y)):
                     continue
+                any_target_in_region = True
                 if self.detection_crosses_player_closed_line(detection.y1, detection.y2):
                     return True
-            return False
+            return any_target_in_region
         if kind == "action":
             action = context.get("action")
             state = self.latest_auto_state
@@ -2710,17 +3063,46 @@ class MainWindow(QMainWindow):
         return probe
 
     def probe_matches(self, image: QImage | None, key: str) -> bool:
+        status = self.probe_status(image, key)
+        return bool(status and status["positive"])
+
+    def probe_status(self, image: QImage | None, key: str) -> dict | None:
         probe = self.pixel_probe(key)
         if image is None or image.isNull() or probe is None:
-            return False
+            return None
         x = int(probe.get("x", 0))
         y = int(probe.get("y", 0))
         if not (0 <= x < image.width() and 0 <= y < image.height()):
-            return False
+            return None
         current = image.pixelColor(x, y)
         expected = QColor(str(probe.get("color", "#000000")))
         tolerance = int(probe.get("tolerance", 45))
-        return self.color_distance(current, expected) <= tolerance
+        distance = self.color_distance(current, expected)
+        mode = str(probe.get("mode", "match"))
+        matched_color = distance <= tolerance
+        positive = not matched_color if mode == "not_match" else matched_color
+        return {
+            "key": key,
+            "label": probe.get("label", key),
+            "mode": mode,
+            "positive": positive,
+            "distance": distance,
+            "tolerance": tolerance,
+            "current_color": current.name(),
+            "expected_color": expected.name(),
+            "x": x,
+            "y": y,
+        }
+
+    def pixel_trigger_statuses(self, image: QImage | None) -> list[dict]:
+        statuses = []
+        for key, probe in self.app_config.get("pixel_probes", {}).items():
+            if probe.get("mode") != "not_match":
+                continue
+            status = self.probe_status(image, key)
+            if status is not None:
+                statuses.append(status)
+        return statuses
 
     @staticmethod
     def color_distance(current: QColor, expected: QColor) -> int:

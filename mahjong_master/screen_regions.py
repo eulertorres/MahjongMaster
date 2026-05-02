@@ -34,6 +34,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "predict_conf": 0.50,
     "debug_enabled": False,
     "capture_mode_enabled": False,
+    "routines_enabled": False,
     "auto_mouse_delay_min": 0.4,
     "auto_mouse_delay_max": 1.2,
     "auto_click_delay_min": 3.0,
@@ -63,6 +64,80 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "button_skip_1": {"label": "Skip 1", "x": 990, "y": 700, "color": "#94A3B8", "tolerance": 45, "enabled": False},
         "button_skip_2": {"label": "Skip 2", "x": 1120, "y": 700, "color": "#94A3B8", "tolerance": 45, "enabled": False},
         "chii_choose_header": {"label": "Header escolher Chii", "x": 795, "y": 523, "color": "#7F2430", "tolerance": 55, "enabled": True},
+        "routine_match_end_yellow": {"label": "Rotina fim amarelo", "x": 1312, "y": 746, "color": "#F8C35A", "tolerance": 70, "enabled": False},
+        "routine_one_more_match": {"label": "Rotina One More", "x": 1100, "y": 746, "color": "#2F61B4", "tolerance": 70, "enabled": False},
+        "routine_confirm": {"label": "Rotina Confirm", "x": 586, "y": 596, "color": "#F8C35A", "tolerance": 70, "enabled": False},
+        "riichi_stick_changed": {
+            "label": "Riichi cigarro mudou",
+            "x": 60,
+            "y": 126,
+            "color": "#1B2536",
+            "tolerance": 35,
+            "enabled": False,
+            "mode": "not_match",
+        },
+        "riichi_stick_player": {
+            "label": "Riichi jogador mudou",
+            "x": 68,
+            "y": 126,
+            "color": "#1B2536",
+            "tolerance": 35,
+            "enabled": False,
+            "mode": "not_match",
+        },
+        "riichi_stick_left": {
+            "label": "Riichi esquerda mudou",
+            "x": 62,
+            "y": 126,
+            "color": "#1B2536",
+            "tolerance": 35,
+            "enabled": False,
+            "mode": "not_match",
+        },
+        "riichi_stick_top": {
+            "label": "Riichi frente mudou",
+            "x": 756,
+            "y": 44,
+            "color": "#1B2536",
+            "tolerance": 35,
+            "enabled": False,
+            "mode": "not_match",
+        },
+        "riichi_stick_right": {
+            "label": "Riichi direita mudou",
+            "x": 1530,
+            "y": 126,
+            "color": "#1B2536",
+            "tolerance": 35,
+            "enabled": False,
+            "mode": "not_match",
+        },
+    },
+    "routines": {
+        "match_end_restart": {
+            "label": "Fim de partida: jogar de novo",
+            "enabled": True,
+            "cooldown_seconds": 0.8,
+            "steps": [
+                {
+                    "trigger": "routine_match_end_yellow",
+                    "click": "routine_match_end_yellow",
+                    "until": "routine_one_more_match",
+                    "label": "fechar tela amarela ate aparecer One More Match",
+                },
+                {
+                    "trigger": "routine_one_more_match",
+                    "click": "routine_one_more_match",
+                    "until": "routine_confirm",
+                    "label": "clicar One More Match",
+                },
+                {
+                    "trigger": "routine_confirm",
+                    "click": "routine_confirm",
+                    "label": "confirmar nova partida",
+                },
+            ],
+        },
     },
     "regions": {
         "player_hand": {
@@ -207,6 +282,7 @@ def normalize_config(config: dict[str, Any]) -> None:
     config["predict_conf"] = clamp_float(config.get("predict_conf", 0.50), 0.01, 0.99)
     config["debug_enabled"] = bool(config.get("debug_enabled", False))
     config["capture_mode_enabled"] = bool(config.get("capture_mode_enabled", False))
+    config["routines_enabled"] = bool(config.get("routines_enabled", False))
     mouse_min = clamp_float(config.get("auto_mouse_delay_min", 0.4), 0.0, 30.0)
     mouse_max = clamp_float(config.get("auto_mouse_delay_max", 1.2), 0.0, 30.0)
     if mouse_min > mouse_max:
@@ -240,6 +316,16 @@ def normalize_config(config: dict[str, Any]) -> None:
         probe["y"] = clamp_int(probe["y"], 0, CAPTURE_HEIGHT - 1)
         probe["tolerance"] = clamp_int(probe["tolerance"], 0, 255)
         probe["enabled"] = bool(probe.get("enabled", True))
+        if probe.get("mode") not in {"match", "not_match"}:
+            probe["mode"] = "match"
+    routines = config.setdefault("routines", {})
+    for key, default_routine in DEFAULT_CONFIG["routines"].items():
+        routine = routines.setdefault(key, deepcopy(default_routine))
+        routine.setdefault("label", default_routine.get("label", key))
+        routine["enabled"] = bool(routine.get("enabled", True))
+        routine["cooldown_seconds"] = clamp_float(routine.get("cooldown_seconds", 0.8), 0.0, 30.0)
+        if not isinstance(routine.get("steps"), list):
+            routine["steps"] = deepcopy(default_routine.get("steps", []))
 
 
 def clamp_int(value: Any, minimum: int, maximum: int) -> int:

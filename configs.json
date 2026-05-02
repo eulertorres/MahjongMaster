@@ -2,14 +2,15 @@
   "version": 1,
   "show_regions_overlay": false,
   "predict_fps": 30.0,
-  "predict_conf": 0.30000000000000004,
+  "predict_conf": 0.65,
   "debug_enabled": false,
   "capture_mode_enabled": false,
-  "auto_mouse_delay_min": 0.2,
-  "auto_mouse_delay_max": 0.4,
-  "auto_click_delay_min": 0.3,
-  "auto_click_delay_max": 0.4,
-  "auto_call_settle_seconds": 2.000000000000001,
+  "routines_enabled": false,
+  "auto_mouse_delay_min": 0.30000000000000004,
+  "auto_mouse_delay_max": 0.5,
+  "auto_click_delay_min": 0.4,
+  "auto_click_delay_max": 0.5,
+  "auto_call_settle_seconds": 0.9999999999999992,
   "pixel_probes": {
     "turn_left": {
       "label": "Vez esquerda",
@@ -17,7 +18,8 @@
       "y": 385,
       "color": "#fff676",
       "tolerance": 25,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "turn_top": {
       "label": "Vez frente",
@@ -25,7 +27,8 @@
       "y": 327,
       "color": "#fffd6c",
       "tolerance": 30,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "turn_right": {
       "label": "Vez direita",
@@ -33,7 +36,8 @@
       "y": 387,
       "color": "#fff777",
       "tolerance": 20,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "turn_player": {
       "label": "Vez jogador",
@@ -41,7 +45,8 @@
       "y": 459,
       "color": "#fff676",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "east_left": {
       "label": "Leste esquerda",
@@ -49,7 +54,8 @@
       "y": 310,
       "color": "#be353d",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "east_top": {
       "label": "Leste frente",
@@ -57,7 +63,8 @@
       "y": 319,
       "color": "#be353d",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "east_right": {
       "label": "Leste direita",
@@ -65,7 +72,8 @@
       "y": 472,
       "color": "#be353d",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "east_player": {
       "label": "Leste jogador",
@@ -73,7 +81,8 @@
       "y": 461,
       "color": "#be353d",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_chii_1": {
       "label": "Chii 1",
@@ -81,15 +90,17 @@
       "y": 730,
       "color": "#cde4cb",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_chii_2": {
       "label": "Chii 2",
-      "x": 770,
-      "y": 700,
-      "color": "#22C55E",
+      "x": 588,
+      "y": 741,
+      "color": "#327963",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_pon_1": {
       "label": "Pon 1",
@@ -97,7 +108,8 @@
       "y": 727,
       "color": "#bfeade",
       "tolerance": 25,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_pon_2": {
       "label": "Pon 2",
@@ -105,7 +117,8 @@
       "y": 700,
       "color": "#06B6D4",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_kan_1": {
       "label": "Kan 1",
@@ -113,7 +126,8 @@
       "y": 700,
       "color": "#F97316",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_kan_2": {
       "label": "Kan 2",
@@ -121,7 +135,8 @@
       "y": 700,
       "color": "#F97316",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_riichi_1": {
       "label": "Riichi 1",
@@ -129,7 +144,8 @@
       "y": 735,
       "color": "#9f4c15",
       "tolerance": 35,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_riichi_2": {
       "label": "Riichi 2",
@@ -137,7 +153,8 @@
       "y": 700,
       "color": "#F97316",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_ron_1": {
       "label": "Ron 1",
@@ -145,7 +162,8 @@
       "y": 700,
       "color": "#E11D48",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_ron_2": {
       "label": "Ron 2",
@@ -153,7 +171,8 @@
       "y": 700,
       "color": "#E11D48",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_tsumo_1": {
       "label": "Tsumo 1",
@@ -161,7 +180,8 @@
       "y": 738,
       "color": "#93264a",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_tsumo_2": {
       "label": "Tsumo 2",
@@ -169,7 +189,8 @@
       "y": 700,
       "color": "#E11D48",
       "tolerance": 45,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
     },
     "button_skip_1": {
       "label": "Skip 1",
@@ -177,7 +198,8 @@
       "y": 738,
       "color": "#5b5a5a",
       "tolerance": 45,
-      "enabled": false
+      "enabled": false,
+      "mode": "match"
     },
     "button_skip_2": {
       "label": "Skip 2",
@@ -185,15 +207,115 @@
       "y": 700,
       "color": "#94A3B8",
       "tolerance": 45,
-      "enabled": false
+      "enabled": false,
+      "mode": "match"
     },
     "chii_choose_header": {
       "label": "Header escolher Chii",
-      "x": 795,
-      "y": 523,
-      "color": "#7F2430",
+      "x": 821,
+      "y": 604,
+      "color": "#6b2b3b",
       "tolerance": 55,
-      "enabled": true
+      "enabled": true,
+      "mode": "match"
+    },
+    "routine_match_end_yellow": {
+      "label": "Rotina fim amarelo",
+      "x": 1407,
+      "y": 877,
+      "color": "#f0cb68",
+      "tolerance": 70,
+      "enabled": true,
+      "mode": "match"
+    },
+    "routine_one_more_match": {
+      "label": "Rotina One More",
+      "x": 685,
+      "y": 25,
+      "color": "#ffffff",
+      "tolerance": 70,
+      "enabled": true,
+      "mode": "match"
+    },
+    "routine_confirm": {
+      "label": "Rotina Confirm",
+      "x": 575,
+      "y": 679,
+      "color": "#fbe37a",
+      "tolerance": 70,
+      "enabled": true,
+      "mode": "match"
+    },
+    "riichi_stick_changed": {
+      "label": "Riichi cigarro mudou",
+      "x": 60,
+      "y": 126,
+      "color": "#1B2536",
+      "tolerance": 35,
+      "enabled": false,
+      "mode": "not_match"
+    },
+    "riichi_stick_player": {
+      "label": "Riichi jogador mudou",
+      "x": 790,
+      "y": 474,
+      "color": "#4e4c58",
+      "tolerance": 35,
+      "enabled": true,
+      "mode": "not_match"
+    },
+    "riichi_stick_left": {
+      "label": "Riichi esquerda mudou",
+      "x": 681,
+      "y": 381,
+      "color": "#4e4c58",
+      "tolerance": 35,
+      "enabled": true,
+      "mode": "not_match"
+    },
+    "riichi_stick_top": {
+      "label": "Riichi frente mudou",
+      "x": 778,
+      "y": 314,
+      "color": "#504d59",
+      "tolerance": 35,
+      "enabled": true,
+      "mode": "not_match"
+    },
+    "riichi_stick_right": {
+      "label": "Riichi direita mudou",
+      "x": 910,
+      "y": 395,
+      "color": "#4e4c58",
+      "tolerance": 35,
+      "enabled": true,
+      "mode": "not_match"
+    }
+  },
+  "routines": {
+    "match_end_restart": {
+      "label": "Fim de partida: jogar de novo",
+      "enabled": true,
+      "cooldown_seconds": 0.8,
+      "steps": [
+        {
+          "trigger": "routine_match_end_yellow",
+          "click": "routine_match_end_yellow",
+          "until": "routine_one_more_match",
+          "label": "fechar tela amarela ate aparecer One More Match"
+        },
+        {
+          "trigger": "routine_one_more_match",
+          "click": "routine_one_more_match",
+          "until": "routine_confirm",
+          "label": "clicar One More Match"
+        },
+        {
+          "trigger": "routine_confirm",
+          "click": "routine_confirm",
+          "label": "confirmar nova partida"
+        }
+      ]
     }
   },
   "regions": {
@@ -253,10 +375,10 @@
     },
     "chii_options": {
       "label": "Opcoes Chii",
-      "x": 538,
-      "y": 531,
-      "w": 515,
-      "h": 170,
+      "x": 559,
+      "y": 618,
+      "w": 465,
+      "h": 106,
       "color": "#F97316",
       "enabled": true
     },

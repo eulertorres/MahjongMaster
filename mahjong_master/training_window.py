@@ -814,7 +814,8 @@ class TrainingWindow(QMainWindow):
             f"{self.training_options_help()}\n\n"
             "Metricas:\n"
             "Losses: menor e melhor. Metricas: maior e melhor.\n"
-            "best.pt e escolhido pela melhor validacao, nao pela ultima epoca.\n\n"
+            "best.pt e escolhido pela melhor validacao, nao pela ultima epoca.\n"
+            "Ao final, o app avalia esse best.pt no split test sem treinar de novo.\n\n"
             "Modelo final:\n"
             "Use weights/best.pt para testar e integrar. weights/last.pt e apenas a ultima epoca."
         )
@@ -835,9 +836,12 @@ class TrainingWindow(QMainWindow):
         train_labels = self.count_files(PROJECT_ROOT / "dataset" / "labels" / "train", {".txt"})
         val_images = self.count_files(PROJECT_ROOT / "dataset" / "images" / "val", {".png", ".jpg", ".jpeg"})
         val_labels = self.count_files(PROJECT_ROOT / "dataset" / "labels" / "val", {".txt"})
+        test_images = self.count_files(PROJECT_ROOT / "dataset" / "images" / "test", {".png", ".jpg", ".jpeg"})
+        test_labels = self.count_files(PROJECT_ROOT / "dataset" / "labels" / "test", {".txt"})
         return (
             f"Dataset: train {train_images} imgs/{train_labels} labels | "
-            f"val {val_images} imgs/{val_labels} labels"
+            f"val {val_images} imgs/{val_labels} labels | "
+            f"test {test_images} imgs/{test_labels} labels"
         )
 
     def create_colab_dataset_zip(self) -> None:
@@ -1015,8 +1019,9 @@ class TrainingWindow(QMainWindow):
         self.save_final_class_metrics()
         if self.current_run_dir is not None:
             best_path = self.current_run_dir / "weights" / "best.pt"
+            test_dir = self.current_run_dir / "test"
             self.status_label.setText(
-                f"{self.dataset_summary()} | Treino finalizado | best.pt: {best_path}"
+                f"{self.dataset_summary()} | Treino finalizado | best.pt: {best_path} | test: {test_dir}"
             )
         else:
             self.status_label.setText(f"{self.dataset_summary()} | Treino finalizado")

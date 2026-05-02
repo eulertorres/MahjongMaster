@@ -105,6 +105,7 @@ Use **Patience** para controlar o EarlyStopping; `0` desativa a parada antecipad
 Durante o treino, os tres graficos sao atualizados a partir do `results.csv` gerado pelo YOLO: loss de treino, loss de validacao e metricas de validacao.
 O app usa `weights/best.pt` como resultado recomendado, porque ele representa a melhor epoca na validacao.
 `weights/last.pt` e apenas a ultima epoca treinada.
+Depois que o treino termina, o script carrega esse `weights/best.pt` e roda uma avaliacao final no split `test`, salvando os artefatos em `runs/detect/<nome_do_treino>/test`.
 O botao **Resumo dos treinos** lista as execucoes em `runs/detect` com `results.csv`.
 Ele mostra comparativos dos 9 dados do treino, velocidade por treino, detalhe do treino selecionado, tabela por classe quando disponivel e imagens geradas pelo YOLO como matriz de confusao, `results.png`, batches e predicoes de validacao.
 
