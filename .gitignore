@@ -13,3 +13,4 @@ dataset/images/**/*.jpg
 dataset/images/**/*.jpeg
 dataset/labels/**/*.txt
 dataset/labels/**/*.cache
+logs/*

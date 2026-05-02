@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wintypes
+import json
 import random
 import sys
 import time
 from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 import mss
@@ -15,6 +17,7 @@ from PyQt6.QtCore import QPointF, QAbstractNativeEventFilter, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -26,6 +29,7 @@ from PyQt6.QtWidgets import (
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -36,6 +40,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QSpinBox,
     QStatusBar,
+    QTextBrowser,
     QToolButton,
     QVBoxLayout,
     QWidgetAction,
@@ -44,13 +49,23 @@ from PyQt6.QtWidgets import (
 
 from mahjong_master.annotator import AnnotatorWindow
 from mahjong_master.game_analyzer import GameAnalyzer, detections_from_yolo_result
-from mahjong_master.mahjong_logic import CallDecision, HandState, Tile, tile_from_name
+from mahjong_master.mahjong_logic import (
+    CallDecision,
+    HandState,
+    Tile,
+    call_candidate_plans,
+    call_plan_score_from_plans,
+    likely_yaku,
+    simulate_call,
+    tile_from_name,
+)
 from mahjong_master.screen_regions import load_config, reset_config, save_config
 from mahjong_master.theme import apply_dark_theme
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RAW_DATASET_DIR = PROJECT_ROOT / "dataset" / "raw"
+AUTO_LOG_DIR = PROJECT_ROOT / "logs" / "autoplay"
 RUNS_DIR = PROJECT_ROOT / "runs" / "detect"
 CONFIG_PATH = PROJECT_ROOT / "configs.json"
 ASSETS_DIR = PROJECT_ROOT / "assets"
@@ -65,6 +80,7 @@ MOUSEEVENTF_LEFTUP = 0x0004
 CAPTURE_WIDTH = 1592
 CAPTURE_HEIGHT = 933
 PREDICT_IMAGE_SIZE = 1600
+AUTO_CAPTURE_INTERVAL_MS = 180_000
 WIND_ORDER = ("east", "south", "west", "north")
 WIND_LETTERS = {"E": "east", "S": "south", "W": "west", "N": "north"}
 VISUAL_TURN_ORDER = ("esquerda", "principal", "direita", "cima")
@@ -136,6 +152,15 @@ class WindowInfo:
     @property
     def label(self) -> str:
         return f"{self.title}  [0x{self.hwnd:08X}]"
+
+
+@dataclass(frozen=True)
+class ChiiOptionCluster:
+    tiles: tuple[Tile, Tile]
+    center_x: float
+    center_y: float
+    signature: tuple[str, str]
+    confidence: float
 
 
 def _window_title(hwnd: int) -> str:
@@ -251,6 +276,21 @@ class RegionRectItem(QGraphicsRectItem):
         self.label_item.setPos(4, 2)
         self.label_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
 
+    def set_interactive(self, enabled: bool) -> None:
+        flags = self.flags()
+        if enabled:
+            flags |= (
+                QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+                | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+            )
+            self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+        else:
+            flags &= ~QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+            flags &= ~QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+            self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self.setSelected(False)
+        self.setFlags(flags)
+
     def itemChange(self, change, value):  # noqa: N802
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene() is not None:
             point = value
@@ -348,6 +388,21 @@ class PixelProbeItem(QGraphicsRectItem):
         self.label_item.setPos(8, -24)
         self.label_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
 
+    def set_interactive(self, enabled: bool) -> None:
+        flags = self.flags()
+        if enabled:
+            flags |= (
+                QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+                | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+            )
+            self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+        else:
+            flags &= ~QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+            flags &= ~QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+            self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self.setSelected(False)
+        self.setFlags(flags)
+
     def itemChange(self, change, value):  # noqa: N802
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene() is not None:
             point = value
@@ -384,6 +439,7 @@ class RegionEditorView(QGraphicsView):
         self.region_items: dict[str, RegionRectItem] = {}
         self.probe_items: dict[str, PixelProbeItem] = {}
         self.selected_probe_key: str | None = None
+        self.edit_mode = "region"
         self._source_image: QImage | None = None
 
     def set_image(self, image: QImage | None) -> None:
@@ -411,7 +467,17 @@ class RegionEditorView(QGraphicsView):
             item.setVisible(bool(probe.get("enabled", True)))
             self.scene.addItem(item)
             self.probe_items[key] = item
+        self.set_edit_mode(self.edit_mode)
         self.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def set_edit_mode(self, mode: str) -> None:
+        self.edit_mode = mode if mode == "probe" else "region"
+        for item in self.region_items.values():
+            item.set_interactive(self.edit_mode == "region")
+        for item in self.probe_items.values():
+            item.set_interactive(self.edit_mode == "probe")
+        if self.edit_mode == "region":
+            self.selected_probe_key = None
 
     def select_key(self, key: str) -> None:
         item = self.region_items.get(key)
@@ -427,7 +493,8 @@ class RegionEditorView(QGraphicsView):
         if item is None:
             return
         self.scene.clearSelection()
-        self.selected_probe_key = key
+        if self.edit_mode == "probe":
+            self.selected_probe_key = key
         item.setSelected(True)
         self.ensureVisible(item, 40, 40)
 
@@ -453,7 +520,7 @@ class RegionEditorView(QGraphicsView):
         self.probe_changed_callback(key, x, y, color, committed)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if self.selected_probe_key and event.button() == Qt.MouseButton.LeftButton:
+        if self.edit_mode == "probe" and self.selected_probe_key and event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.position().toPoint())
             x = max(0, min(CAPTURE_WIDTH - 1, round(scene_pos.x())))
             y = max(0, min(CAPTURE_HEIGHT - 1, round(scene_pos.y())))
@@ -480,10 +547,14 @@ class RegionConfigDialog(QDialog):
     def __init__(self, config: dict, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Configurar areas de deteccao")
-        self.resize(980, 720)
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        self.setSizeGripEnabled(True)
+        self.resize(980, 640)
+        self.setMinimumSize(560, 380)
         self.config = config
         self.current_key: str | None = None
         self.current_probe_key: str | None = None
+        self.edit_mode = "region"
 
         self.editor_view = RegionEditorView(
             self.config,
@@ -499,6 +570,7 @@ class RegionConfigDialog(QDialog):
         for key, region in self.config["regions"].items():
             self.region_combo.addItem(f"{region['label']} ({key})", key)
         self.region_combo.currentIndexChanged.connect(self.load_selected_region)
+        self.region_combo.setMinimumContentsLength(18)
 
         self.enabled_checkbox = QCheckBox("Ativa")
         self.x_input = self.region_spinbox(CAPTURE_WIDTH)
@@ -506,37 +578,36 @@ class RegionConfigDialog(QDialog):
         self.w_input = self.region_spinbox(CAPTURE_WIDTH)
         self.h_input = self.region_spinbox(CAPTURE_HEIGHT)
 
-        form = QFormLayout()
-        form.addRow("Area", self.region_combo)
-        form.addRow("", self.enabled_checkbox)
-        form.addRow("X", self.x_input)
-        form.addRow("Y", self.y_input)
-        form.addRow("Largura", self.w_input)
-        form.addRow("Altura", self.h_input)
-
         self.probe_combo = QComboBox()
         for key, probe in self.config.get("pixel_probes", {}).items():
             self.probe_combo.addItem(f"{probe['label']} ({key})", key)
         self.probe_combo.currentIndexChanged.connect(self.load_selected_probe)
+        self.probe_combo.setMinimumContentsLength(18)
         self.probe_enabled_checkbox = QCheckBox("Ativo")
         self.probe_x_input = self.region_spinbox(CAPTURE_WIDTH)
         self.probe_y_input = self.region_spinbox(CAPTURE_HEIGHT)
         self.probe_tolerance_input = self.region_spinbox(255)
         self.probe_color_label = QLabel("-")
-        self.probe_color_label.setMinimumWidth(90)
+        self.probe_color_label.setMinimumWidth(78)
 
-        probe_form = QFormLayout()
-        probe_form.addRow("Pixel", self.probe_combo)
-        probe_form.addRow("", self.probe_enabled_checkbox)
-        probe_form.addRow("X", self.probe_x_input)
-        probe_form.addRow("Y", self.probe_y_input)
-        probe_form.addRow("Cor", self.probe_color_label)
-        probe_form.addRow("Tolerancia", self.probe_tolerance_input)
+        self.area_mode_button = QPushButton("Editar area")
+        self.area_mode_button.setCheckable(True)
+        self.area_mode_button.setChecked(True)
+        self.pixel_mode_button = QPushButton("Editar pixel")
+        self.pixel_mode_button.setCheckable(True)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
+        self.mode_group.addButton(self.area_mode_button)
+        self.mode_group.addButton(self.pixel_mode_button)
+        self.area_mode_button.clicked.connect(lambda: self.set_edit_mode("region"))
+        self.pixel_mode_button.clicked.connect(lambda: self.set_edit_mode("probe"))
 
         save_button = QPushButton("Salvar area")
         save_button.clicked.connect(self.save_current_region)
         save_probe_button = QPushButton("Salvar pixel")
         save_probe_button.clicked.connect(self.save_current_probe)
+        refresh_screen_button = QPushButton("Atualizar tela")
+        refresh_screen_button.clicked.connect(self.refresh_frozen_screen)
         reset_button = QPushButton("Restaurar padrao")
         reset_button.clicked.connect(self.reset_to_defaults)
 
@@ -544,12 +615,45 @@ class RegionConfigDialog(QDialog):
         button_box.rejected.connect(self.reject)
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         layout.addWidget(self.editor_view, stretch=1)
-        layout.addLayout(form)
-        layout.addLayout(probe_form)
+        controls_grid = QGridLayout()
+        controls_grid.setHorizontalSpacing(8)
+        controls_grid.setVerticalSpacing(4)
+        controls_grid.addWidget(QLabel("Area"), 0, 0)
+        controls_grid.addWidget(self.region_combo, 0, 1, 1, 3)
+        controls_grid.addWidget(self.enabled_checkbox, 0, 4)
+        controls_grid.addWidget(QLabel("X"), 0, 5)
+        controls_grid.addWidget(self.x_input, 0, 6)
+        controls_grid.addWidget(QLabel("Y"), 0, 7)
+        controls_grid.addWidget(self.y_input, 0, 8)
+        controls_grid.addWidget(QLabel("L"), 0, 9)
+        controls_grid.addWidget(self.w_input, 0, 10)
+        controls_grid.addWidget(QLabel("A"), 0, 11)
+        controls_grid.addWidget(self.h_input, 0, 12)
+        controls_grid.addWidget(QLabel("Pixel"), 1, 0)
+        controls_grid.addWidget(self.probe_combo, 1, 1, 1, 3)
+        controls_grid.addWidget(self.probe_enabled_checkbox, 1, 4)
+        controls_grid.addWidget(QLabel("X"), 1, 5)
+        controls_grid.addWidget(self.probe_x_input, 1, 6)
+        controls_grid.addWidget(QLabel("Y"), 1, 7)
+        controls_grid.addWidget(self.probe_y_input, 1, 8)
+        controls_grid.addWidget(QLabel("Cor"), 1, 9)
+        controls_grid.addWidget(self.probe_color_label, 1, 10)
+        controls_grid.addWidget(QLabel("Tol"), 1, 11)
+        controls_grid.addWidget(self.probe_tolerance_input, 1, 12)
+        controls_grid.setColumnStretch(1, 1)
+        controls_grid.setColumnStretch(2, 1)
+        controls_grid.setColumnStretch(3, 1)
+        layout.addLayout(controls_grid)
         actions = QHBoxLayout()
+        actions.addWidget(self.area_mode_button)
+        actions.addWidget(self.pixel_mode_button)
+        actions.addSpacing(12)
         actions.addWidget(save_button)
         actions.addWidget(save_probe_button)
+        actions.addWidget(refresh_screen_button)
         actions.addWidget(reset_button)
         actions.addStretch(1)
         layout.addLayout(actions)
@@ -557,12 +661,30 @@ class RegionConfigDialog(QDialog):
         self.setLayout(layout)
         self.load_selected_region()
         self.load_selected_probe()
+        self.set_edit_mode("region")
 
     def set_preview_image(self, image: QImage | None) -> None:
         self.editor_view.set_image(image)
-        if self.current_key:
+        if self.edit_mode == "region" and self.current_key:
             self.editor_view.select_key(self.current_key)
-        if self.current_probe_key:
+        if self.edit_mode == "probe" and self.current_probe_key:
+            self.editor_view.select_probe_key(self.current_probe_key)
+
+    def refresh_frozen_screen(self) -> None:
+        parent = self.parent()
+        if parent and hasattr(parent, "capture_once"):
+            parent.capture_once(force=True)
+        image = getattr(parent, "last_capture", None) if parent is not None else None
+        self.set_preview_image(image)
+
+    def set_edit_mode(self, mode: str) -> None:
+        self.edit_mode = mode if mode == "probe" else "region"
+        self.area_mode_button.setChecked(self.edit_mode == "region")
+        self.pixel_mode_button.setChecked(self.edit_mode == "probe")
+        self.editor_view.set_edit_mode(self.edit_mode)
+        if self.edit_mode == "region" and self.current_key:
+            self.editor_view.select_key(self.current_key)
+        elif self.edit_mode == "probe" and self.current_probe_key:
             self.editor_view.select_probe_key(self.current_probe_key)
 
     def region_spinbox(self, maximum: int) -> QSpinBox:
@@ -581,7 +703,8 @@ class RegionConfigDialog(QDialog):
         self.y_input.setValue(int(region["y"]))
         self.w_input.setValue(int(region["w"]))
         self.h_input.setValue(int(region["h"]))
-        self.editor_view.select_key(self.current_key)
+        if self.edit_mode == "region":
+            self.editor_view.select_key(self.current_key)
 
     def load_selected_probe(self) -> None:
         self.current_probe_key = self.probe_combo.currentData()
@@ -593,7 +716,8 @@ class RegionConfigDialog(QDialog):
         self.probe_y_input.setValue(int(probe["y"]))
         self.probe_tolerance_input.setValue(int(probe.get("tolerance", 45)))
         self.set_probe_color_label(str(probe.get("color", "#FBBF24")))
-        self.editor_view.select_probe_key(self.current_probe_key)
+        if self.edit_mode == "probe":
+            self.editor_view.select_probe_key(self.current_probe_key)
 
     def save_current_region(self) -> None:
         if not self.current_key:
@@ -728,6 +852,14 @@ class MainWindow(QMainWindow):
         self.auto_pending_context: dict | None = None
         self.auto_blocked_discard_keys: dict[str, float] = {}
         self.auto_last_discard_attempt: dict | None = None
+        self.auto_call_settle_until = 0.0
+        self.chii_option_history: deque[list[ChiiOptionCluster]] = deque(maxlen=4)
+        self.chii_option_header_frames = 0
+        self.auto_decision_log_path: Path | None = None
+        self.auto_decision_log_last_at = 0.0
+        self.auto_decision_log_last_signature = ""
+        self.auto_decision_log_events = 0
+        self.auto_no_hand_frames = 0
         self.latest_auto_image: QImage | None = None
         self.latest_auto_detections: list = []
         self.latest_auto_state: HandState | None = None
@@ -741,6 +873,7 @@ class MainWindow(QMainWindow):
             float(self.app_config.get("auto_click_delay_min", 3.0)),
             float(self.app_config.get("auto_click_delay_max", 5.0)),
         )
+        self.auto_call_settle_seconds = float(self.app_config.get("auto_call_settle_seconds", 1.6))
         self.annotator_window: AnnotatorWindow | None = None
         self.training_window = None
         self.region_config_dialog: RegionConfigDialog | None = None
@@ -801,6 +934,11 @@ class MainWindow(QMainWindow):
         self.preview_checkbox.setChecked(True)
         self.preview_checkbox.stateChanged.connect(self.preview_setting_changed)
 
+        self.capture_mode_checkbox = QCheckBox("Capt")
+        self.capture_mode_checkbox.setToolTip("Salva screenshot automaticamente a cada 3 minutos.")
+        self.capture_mode_checkbox.setChecked(bool(self.app_config.get("capture_mode_enabled", False)))
+        self.capture_mode_checkbox.stateChanged.connect(self.capture_mode_changed)
+
         self.debug_checkbox = QCheckBox("Dbg")
         self.debug_checkbox.setChecked(bool(self.app_config.get("debug_enabled", False)))
         self.debug_checkbox.stateChanged.connect(self.debug_setting_changed)
@@ -841,6 +979,15 @@ class MainWindow(QMainWindow):
         self.auto_click_max_input.setValue(float(self.app_config.get("auto_click_delay_max", 5.0)))
         self.auto_click_max_input.valueChanged.connect(self.auto_timing_changed)
 
+        self.auto_call_settle_input = QDoubleSpinBox()
+        self.auto_call_settle_input.setRange(0.0, 10.0)
+        self.auto_call_settle_input.setSingleStep(0.1)
+        self.auto_call_settle_input.setDecimals(1)
+        self.auto_call_settle_input.setSuffix(" s")
+        self.auto_call_settle_input.setFixedWidth(76)
+        self.auto_call_settle_input.setValue(float(self.app_config.get("auto_call_settle_seconds", 1.6)))
+        self.auto_call_settle_input.valueChanged.connect(self.auto_timing_changed)
+
         self.options_button = QToolButton()
         self.options_button.setText("Opcoes")
         self.options_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -863,11 +1010,13 @@ class MainWindow(QMainWindow):
 
         self.debug_state_label = QLabel("Capturas: 0 | Predicts: 0")
         self.debug_state_label.setVisible(False)
-        self.game_summary_log = QPlainTextEdit()
-        self.game_summary_log.setReadOnly(True)
+        self.game_summary_log = QTextBrowser()
+        self.game_summary_log.setOpenExternalLinks(False)
         self.game_summary_log.setMinimumHeight(120)
-        self.game_summary_log.document().setMaximumBlockCount(250)
         self.game_summary_log.setPlaceholderText("Resumo da mao aparece aqui apos o predict.")
+        self.game_summary_log.setStyleSheet(
+            "QTextBrowser { background: #0B1220; border: 1px solid #1F2937; border-radius: 4px; }"
+        )
 
         self.debug_log = QPlainTextEdit()
         self.debug_log.setReadOnly(True)
@@ -894,6 +1043,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.predict_checkbox)
         controls.addWidget(self.auto_play_checkbox)
         controls.addWidget(self.preview_checkbox)
+        controls.addWidget(self.capture_mode_checkbox)
         controls.addWidget(self.show_regions_checkbox)
         controls.addWidget(self.options_button)
         controls.addWidget(self.annotator_button)
@@ -927,10 +1077,15 @@ class MainWindow(QMainWindow):
         self.timer.setInterval(self.refresh_interval_ms)
         self.timer.timeout.connect(self.capture_once)
 
+        self.capture_timer = QTimer(self)
+        self.capture_timer.setInterval(AUTO_CAPTURE_INTERVAL_MS)
+        self.capture_timer.timeout.connect(self.auto_capture_screenshot)
+
         self.refresh_model_list()
         self.refresh_windows()
         self.refresh_timer_interval()
         self.timer.start()
+        self.capture_mode_changed()
         self.set_game_summary(self.last_game_summary)
         self.debug_setting_changed()
         self.log_debug("App iniciado.")
@@ -948,6 +1103,7 @@ class MainWindow(QMainWindow):
         layout.addRow("Mover max", self.auto_mouse_max_input)
         layout.addRow("Clique min", self.auto_click_min_input)
         layout.addRow("Clique max", self.auto_click_max_input)
+        layout.addRow("Apos call", self.auto_call_settle_input)
         action = QWidgetAction(menu)
         action.setDefaultWidget(panel)
         menu.addAction(action)
@@ -1000,8 +1156,199 @@ class MainWindow(QMainWindow):
 
     def set_game_summary(self, summary: str) -> None:
         self.last_game_summary = summary
-        self.game_summary_log.setPlainText(summary)
+        self.game_summary_log.setHtml(
+            "<html><body style='background:#0B1220;color:#E5E7EB;font-family:Segoe UI,Arial,sans-serif;'>"
+            f"<pre style='white-space:pre-wrap;font-size:12px;'>{escape(summary)}</pre>"
+            "</body></html>"
+        )
         self.game_summary_log.repaint()
+
+    def set_game_summary_state(self, state: HandState) -> None:
+        summary = state.summary()
+        self.last_game_summary = summary
+        self.game_summary_log.setHtml(self.game_summary_html(state))
+        self.game_summary_log.repaint()
+
+    def game_summary_html(self, state: HandState) -> str:
+        dora = "".join(self.tile_chip(tile) for tile in state.dora_tiles[:5]) or self.empty_chip("-")
+        indicators = "".join(self.tile_chip(tile) for tile in state.dora_indicators[:5]) or self.empty_chip("-")
+        hand_tiles = "".join(self.tile_chip(tile) for tile in state.hand_tiles)
+        if state.missing_count:
+            hand_tiles += "".join(self.empty_chip("???") for _ in range(state.missing_count))
+        melds = "".join(self.meld_chip(meld) for meld in state.open_melds) or self.empty_chip("-")
+        yaku_cards = self.plans_compact_table(state.likely_yaku[:7])
+        needs = self.needs_table(state.helpful_missing_tiles[:8])
+        discard_cards = "".join(self.discard_card(explanation) for explanation in state.discard_explanations)
+        if not discard_cards:
+            discard_cards = "<div class='muted'>Ainda sem descarte recomendado.</div>"
+        furiten_box = self.furiten_box(state)
+        calls = "".join(self.call_chip(decision) for decision in state.call_decisions)
+        if not calls and not (state.chii_button_visible or state.pon_button_visible or state.kan_button_visible):
+            calls = "<div class='muted'>Nenhum botao de chamada ativo.</div>"
+
+        winds = " ".join(
+            f"<span class='pill'>{label}: {escape(str(state.player_winds.get(player, '?')))}</span>"
+            for player, label in (("principal", "P"), ("esquerda", "E"), ("cima", "C"), ("direita", "D"))
+        )
+        warning = ""
+        if state.missing_count:
+            warning = (
+                f"<div class='warn'>Leitura incompleta: faltam {state.missing_count} peca(s); "
+                "a recomendacao pode oscilar.</div>"
+            )
+
+        return f"""
+        <html>
+        <head>
+        <style>
+            body {{ margin:0; background:#0B1220; color:#D7DEE9; font-family:'Segoe UI', Arial, sans-serif; }}
+            .wrap {{ padding:8px; }}
+            .top {{ margin-bottom:8px; }}
+            .pill {{ background:#101826; border:1px solid #2A3648; border-radius:4px; padding:3px 7px; color:#C8D1DF; }}
+            .panel {{ background:#111827; border:1px solid #1F2937; border-radius:6px; padding:8px; }}
+            .cell {{ vertical-align:top; width:50%; }}
+            .title {{ color:#F3F6FB; font-size:12px; font-weight:700; margin-bottom:6px; }}
+            .muted {{ color:#94A3B8; font-size:11px; }}
+            .warn {{ background:#172033; padding:6px 8px; margin-bottom:8px; color:#E9DFA8; }}
+            .tile {{ background:#101826; border:1px solid #334155; border-radius:4px; padding:2px 5px; font-weight:700; white-space:nowrap; }}
+            .empty {{ color:#94A3B8; border:1px dashed #475569; border-radius:4px; padding:2px 5px; white-space:nowrap; }}
+            .meld {{ background:#0F172A; border:1px solid #334155; border-radius:4px; padding:4px 6px; }}
+            .discard {{ margin-bottom:8px; border:1px solid #334155; border-radius:6px; }}
+            .badge {{ font-size:10px; font-weight:800; padding:3px 6px; border-radius:4px; }}
+            .badge.red {{ background:#3A1820; color:#FCA5A5; border:1px solid #7F1D1D; }}
+            .badge.yellow {{ background:#332A14; color:#FDE68A; border:1px solid #854D0E; }}
+            .meter {{ height:7px; background:#1E293B; }}
+            .fill {{ height:7px; background:#D15E68; }}
+            .discard-body {{ padding:6px 8px; font-size:11px; color:#CBD5E1; }}
+            .protect {{ color:#9DDBC5; }}
+            .reason {{ color:#DFA3A3; }}
+            .stat {{ color:#91B7E8; }}
+            .bar {{ margin:4px 0; }}
+            .bar-label {{ font-size:11px; color:#CBD5E1; }}
+            .bar-fill {{ height:7px; }}
+            .plan-row {{ border-bottom:1px solid #1F2937; }}
+            .plan-score {{ color:#CFE3FF; font-weight:700; }}
+            .need-row {{ border-bottom:1px solid #1F2937; }}
+            .call {{ background:#0F172A; border:1px solid #334155; border-radius:5px; padding:5px 7px; }}
+        </style>
+        </head>
+        <body><div class='wrap'>
+            <div class='top'>
+                <span class='pill'>{len(state.all_known_tiles)}/{state.expected_visible_min} pecas</span>
+                {winds}
+                <span class='pill'>Dora {dora}</span>
+                <span class='pill'>Indic {indicators}</span>
+            </div>
+            {warning}
+            <table width='100%' cellspacing='6' cellpadding='0'>
+                <tr>
+                    <td class='cell'><div class='panel'><div class='title'>Mao</div>{hand_tiles}<div class='title' style='margin-top:8px;'>Abertas</div>{melds}</div></td>
+                    <td class='cell'><div class='panel'><div class='title'>Planos ativos</div>{yaku_cards}</div></td>
+                </tr>
+                <tr>
+                    <td class='cell'><div class='panel'><div class='title'>Descartes marcados no overlay</div>{furiten_box}{discard_cards}</div></td>
+                    <td class='cell'><div class='panel'><div class='title'>Pecas que ajudam</div>{needs}<div class='title' style='margin-top:8px;'>Chamadas</div>{calls}</div></td>
+                </tr>
+            </table>
+        </div></body></html>
+        """
+
+    def tile_chip(self, tile: Tile) -> str:
+        colors = {
+            "man": "#F0A6A6",
+            "pin": "#A9C7F5",
+            "sou": "#A7D9B8",
+            "wind": "#D9C78B",
+            "dragon": "#D7A6CC",
+        }
+        accent = colors.get(tile.suit, "#CBD5E1")
+        return (
+            f"<span class='tile' style='color:{accent};'>"
+            f"&nbsp;{escape(tile.compact)}&nbsp;</span>&nbsp;"
+        )
+
+    def empty_chip(self, text: str) -> str:
+        return f"<span class='empty'>&nbsp;{escape(text)}&nbsp;</span>&nbsp;"
+
+    def meld_chip(self, meld) -> str:
+        tiles = "".join(self.tile_chip(tile) for tile in meld.tiles)
+        return f"<span class='meld'><b>{escape(str(meld.kind.value))}</b>&nbsp;{tiles}</span>&nbsp;"
+
+    def plans_compact_table(self, matches) -> str:
+        if not matches:
+            return "<div class='muted'>Sem yaku confiavel ainda.</div>"
+        rows = []
+        for match in matches:
+            rows.append(
+                "<tr class='plan-row'>"
+                f"<td style='color:#CBD5E1;padding:1px 0;'>{escape(match.yaku.name)}</td>"
+                f"<td class='plan-score' align='right' width='44'>{max(0, min(100, int(match.confidence)))}%</td>"
+                "</tr>"
+            )
+        return "<table width='100%' cellspacing='0' cellpadding='1'>" + "".join(rows) + "</table>"
+
+    def needs_table(self, needs) -> str:
+        if not needs:
+            return self.empty_chip("-")
+        rows = []
+        for need in needs:
+            rows.append(
+                "<tr class='need-row'>"
+                f"<td width='72'>{self.tile_chip(need.tile)}</td>"
+                f"<td width='42' align='right'><b>{need.score}%</b></td>"
+                f"<td style='color:#94A3B8;'>&nbsp;{escape(need.reason)}</td>"
+                "</tr>"
+            )
+        return "<table width='100%' cellspacing='0' cellpadding='2'>" + "".join(rows) + "</table>"
+
+    def furiten_box(self, state: HandState) -> str:
+        if not state.current_furiten_waits and not state.furiten_waits:
+            return ""
+        current = "".join(
+            f"<div class='reason'>Atual: {self.tile_chip(need.tile)} {escape(need.reason)}</div>"
+            for need in state.current_furiten_waits
+        )
+        future = "".join(
+            f"<div class='reason'>Risco: {self.tile_chip(need.tile)} {escape(need.reason)}</div>"
+            for need in state.furiten_waits
+        )
+        return (
+            "<div style='background:#28171B;border:1px solid #7F1D1D;padding:6px;margin-bottom:8px;'>"
+            "<b style='color:#FCA5A5;'>Furiten</b>"
+            f"{current}{future}"
+            "</div>"
+        )
+
+    def discard_card(self, explanation) -> str:
+        badge = "VERMELHA" if explanation.color == "red" else "AMARELA"
+        reason_items = "".join(f"<div class='reason'>- {escape(reason)}</div>" for reason in explanation.reasons)
+        safeguard_items = "".join(f"<div class='protect'>+ {escape(reason)}</div>" for reason in explanation.safeguards)
+        stats = (
+            f"<span class='stat'>visiveis {explanation.visible_count}/4</span> | "
+            f"<span class='stat'>nao vistas {explanation.remaining_count}</span> | "
+            f"<span class='stat'>shanten apos {explanation.shanten_after}</span> | "
+            f"<span class='stat'>compras {explanation.ukeire_after}</span>"
+        )
+        return (
+            f"<div class='discard {explanation.color}'>"
+            "<table width='100%' cellspacing='0' cellpadding='6' style='background:#0F172A;'><tr>"
+            f"<td width='82'><span class='badge {explanation.color}'>{badge}</span></td>"
+            f"<td width='110'>{self.tile_chip(explanation.tile)}</td>"
+            f"<td><b>pressao {explanation.pressure}%</b></td>"
+            "</tr></table>"
+            f"<div class='meter'><div class='fill' style='width:{explanation.pressure}%;'></div></div>"
+            f"<div class='discard-body'>{stats}{reason_items}{safeguard_items}</div>"
+            "</div>"
+        )
+
+    def call_chip(self, decision: CallDecision) -> str:
+        color = "#22C55E" if decision.recommended else "#EF4444"
+        verdict = "OK" if decision.recommended else "SKIP"
+        return (
+            f"<span class='call' style='border-color:{color};'>"
+            f"<b style='color:{color};'>{escape(verdict)}</b> {escape(decision.action)} "
+            f"{decision.confidence}%<br><small>{escape(decision.reason)}</small></span>"
+        )
 
     def debug_setting_changed(self, *_args) -> None:
         enabled = self.debug_checkbox.isChecked()
@@ -1139,11 +1486,16 @@ class MainWindow(QMainWindow):
             self.log_debug("Predict desligado.")
 
     def auto_play_setting_changed(self, *_args) -> None:
+        if not self.auto_play_checkbox.isChecked():
+            self.finalize_auto_decision_log("autoplay_off")
         self.auto_turn_frames = 0
+        self.reset_chii_option_tracker()
         for history in self.auto_decision_history.values():
             history.clear()
         if self.auto_play_checkbox.isChecked() and not self.predict_checkbox.isChecked():
             self.predict_checkbox.setChecked(True)
+        if self.auto_play_checkbox.isChecked():
+            self.start_auto_decision_log()
         state = "ligado" if self.auto_play_checkbox.isChecked() else "desligado"
         self.log_debug(f"Auto {state}.")
         self.refresh_debug_state()
@@ -1179,13 +1531,16 @@ class MainWindow(QMainWindow):
         )
         self.auto_mouse_delay_seconds = (mouse_min, mouse_max)
         self.auto_click_delay_seconds = (click_min, click_max)
+        self.auto_call_settle_seconds = self.auto_call_settle_input.value()
         self.app_config["auto_mouse_delay_min"] = mouse_min
         self.app_config["auto_mouse_delay_max"] = mouse_max
         self.app_config["auto_click_delay_min"] = click_min
         self.app_config["auto_click_delay_max"] = click_max
+        self.app_config["auto_call_settle_seconds"] = self.auto_call_settle_seconds
         save_config(CONFIG_PATH, self.app_config)
         self.statusBar().showMessage(
-            f"Auto: move {mouse_min:.1f}-{mouse_max:.1f}s; clique {click_min:.1f}-{click_max:.1f}s."
+            f"Auto: move {mouse_min:.1f}-{mouse_max:.1f}s; clique {click_min:.1f}-{click_max:.1f}s; "
+            f"apos call {self.auto_call_settle_seconds:.1f}s."
         )
 
     def sync_timing_pair(self, min_input: QDoubleSpinBox, max_input: QDoubleSpinBox) -> tuple[float, float]:
@@ -1215,6 +1570,18 @@ class MainWindow(QMainWindow):
             self.preview_label.setPixmap(QPixmap())
             self.preview_label.setText("Preview desabilitado. Ative novamente para ver a janela.")
         self.refresh_debug_state()
+
+    def capture_mode_changed(self, *_args) -> None:
+        enabled = self.capture_mode_checkbox.isChecked()
+        self.app_config["capture_mode_enabled"] = enabled
+        save_config(CONFIG_PATH, self.app_config)
+        if enabled:
+            self.capture_timer.start()
+            self.statusBar().showMessage("Modo captura ligado: screenshot a cada 3 minutos.")
+            self.log_debug("Modo captura ligado.")
+        else:
+            self.capture_timer.stop()
+            self.log_debug("Modo captura desligado.")
 
     def refresh_model_list(self) -> None:
         current_path = self.selected_model_path()
@@ -1358,11 +1725,13 @@ class MainWindow(QMainWindow):
             started_at = time.perf_counter()
             device = self.prediction_device()
             chii_button_visible = self.detect_chii_button(image)
+            chii_choose_visible = self.detect_chii_choose_header(image)
             pon_button_visible = self.detect_pon_button(image)
             kan_button_visible = self.detect_kan_button(image)
             riichi_button_visible = self.detect_riichi_button(image)
             win_button_visible = self.detect_win_button(image)
-            call_source_player = "esquerda" if chii_button_visible else self.detect_call_source_player(image)
+            chii_prompt_visible = chii_button_visible or chii_choose_visible
+            call_source_player = "esquerda" if chii_prompt_visible else self.detect_call_source_player(image)
             player_winds = self.detect_player_winds(image)
             self.log_debug(
                 f"Predict start ({source}) | frame={image.width()}x{image.height()} | "
@@ -1388,7 +1757,7 @@ class MainWindow(QMainWindow):
         detections = detections_from_yolo_result(result)
         state = GameAnalyzer(CAPTURE_WIDTH, CAPTURE_HEIGHT, self.app_config["regions"]).analyze(
             detections,
-            chii_button_visible=chii_button_visible,
+            chii_button_visible=chii_prompt_visible,
             pon_button_visible=pon_button_visible,
             kan_button_visible=kan_button_visible,
             call_source_player=call_source_player,
@@ -1399,7 +1768,7 @@ class MainWindow(QMainWindow):
         output = image.copy()
         self.draw_predictions(output, result, state)
         self.draw_call_indicators(output, state, call_source_player)
-        self.handle_auto_play(image, detections, state, riichi_button_visible, win_button_visible)
+        self.handle_auto_play(image, detections, state, riichi_button_visible, win_button_visible, chii_choose_visible)
         self.predict_count += 1
         self.log_debug(f"Predict ok ({source}) | {len(result.boxes)} deteccoes | {elapsed_ms:.0f} ms")
         self.statusBar().showMessage(
@@ -1417,7 +1786,7 @@ class MainWindow(QMainWindow):
         return output
 
     def update_game_state(self, state: HandState) -> None:
-        self.set_game_summary(state.summary())
+        self.set_game_summary_state(state)
         self.log_debug(f"Estado de jogo: {state.summary()}")
 
     def extend_terminal_action_decisions(
@@ -1452,6 +1821,9 @@ class MainWindow(QMainWindow):
 
     def detect_chii_button(self, image: QImage) -> bool:
         return self.active_button_probe(image, "Chii") is not None
+
+    def detect_chii_choose_header(self, image: QImage) -> bool:
+        return self.probe_matches(image, "chii_choose_header")
 
     def detect_pon_button(self, image: QImage) -> bool:
         return self.active_button_probe(image, "Pon") is not None
@@ -1512,18 +1884,20 @@ class MainWindow(QMainWindow):
         state: HandState,
         riichi_button_visible: bool,
         win_button_visible: bool,
+        chii_choose_visible: bool,
     ) -> None:
         self.remember_auto_context(image, detections, state, riichi_button_visible, win_button_visible)
         if not self.auto_play_checkbox.isChecked():
             self.auto_turn_frames = 0
             self.auto_last_discard_attempt = None
             self.auto_blocked_discard_keys.clear()
+            self.auto_call_settle_until = 0.0
+            self.reset_chii_option_tracker()
             for history in self.auto_decision_history.values():
                 history.clear()
             return
+        self.log_auto_decision_frame(state, riichi_button_visible, win_button_visible, chii_choose_visible)
         self.update_auto_discard_failure_guard(state)
-        if self.auto_click_pending or time.perf_counter() - self.auto_last_click_at < 0.8:
-            return
 
         visible_actions = {
             "Chii": state.chii_button_visible,
@@ -1540,6 +1914,14 @@ class MainWindow(QMainWindow):
         for action, visible in visible_actions.items():
             self.auto_decision_history[action].append(bool(visible and action in recommended_actions))
 
+        if self.auto_click_pending or time.perf_counter() - self.auto_last_click_at < 0.8:
+            return
+
+        if chii_choose_visible:
+            self.handle_chii_option_autoplay(detections, state)
+            return
+        self.reset_chii_option_tracker()
+
         for action in ("Ron/Tsumo", "Riichi", "Kan", "Pon", "Chii"):
             if visible_actions[action] and any(self.auto_decision_history[action]):
                 if self.click_action_button(action):
@@ -1547,6 +1929,25 @@ class MainWindow(QMainWindow):
                     self.auto_last_click_at = time.perf_counter()
                     self.auto_turn_frames = 0
                 return
+
+        visible_call_actions = [
+            action
+            for action in ("Kan", "Pon", "Chii")
+            if visible_actions[action]
+        ]
+        if visible_call_actions and not any(action in recommended_actions for action in visible_call_actions):
+            if self.click_skip_button(visible_call_actions):
+                actions_text = "/".join(visible_call_actions)
+                self.log_debug(f"Auto: {actions_text} nao recomendado; agendou Skip.")
+                self.auto_last_click_at = time.perf_counter()
+                self.auto_turn_frames = 0
+            return
+
+        if time.perf_counter() < self.auto_call_settle_until:
+            remaining = self.auto_call_settle_until - time.perf_counter()
+            self.auto_turn_frames = 0
+            self.statusBar().showMessage(f"Auto: aguardando mesa estabilizar apos call ({remaining:.1f}s).")
+            return
 
         if self.detect_own_turn(image):
             self.auto_turn_frames += 1
@@ -1560,6 +1961,273 @@ class MainWindow(QMainWindow):
             self.log_debug("Auto: agendou descarte da pior peca recomendada.")
             self.auto_last_click_at = time.perf_counter()
             self.auto_turn_frames = 0
+
+    def handle_chii_option_autoplay(self, detections: list, state: HandState) -> None:
+        clusters = self.detect_chii_option_clusters(detections)
+        self.chii_option_header_frames += 1
+        if clusters:
+            self.chii_option_history.append(clusters)
+        else:
+            self.statusBar().showMessage("Auto: seletor de Chii visivel; aguardando tiles das opcoes.")
+            self.log_debug("Auto: seletor de Chii sem clusters detectados na area configurada.")
+            return
+
+        if self.chii_option_header_frames < 3 or len(self.chii_option_history) < 3:
+            self.statusBar().showMessage(
+                f"Auto: estabilizando opcoes de Chii ({self.chii_option_header_frames}/3)."
+            )
+            return
+
+        stable_clusters = self.stable_chii_option_clusters()
+        best = self.best_chii_option_cluster(state, stable_clusters)
+        if best is None:
+            self.log_debug("Auto: opcoes de Chii estaveis, mas nenhuma combina com as opcoes calculadas.")
+            return
+
+        if self.click_normalized_point(
+            best.center_x,
+            best.center_y,
+            {"kind": "chii_option", "signature": best.signature},
+        ):
+            tiles = "+".join(tile.compact for tile in best.tiles)
+            self.log_debug(f"Auto: agendou opcao de Chii {tiles}.")
+            self.auto_last_click_at = time.perf_counter()
+            self.reset_chii_option_tracker()
+
+    def reset_chii_option_tracker(self) -> None:
+        self.chii_option_history.clear()
+        self.chii_option_header_frames = 0
+
+    def start_auto_decision_log(self) -> None:
+        if self.auto_decision_log_path is not None:
+            return
+        AUTO_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.auto_decision_log_path = AUTO_LOG_DIR / f"autoplay_{timestamp}.jsonl"
+        self.auto_decision_log_last_at = 0.0
+        self.auto_decision_log_last_signature = ""
+        self.auto_decision_log_events = 0
+        self.auto_no_hand_frames = 0
+        self.write_auto_decision_log({"event": "session_start", "time": datetime.now().isoformat(timespec="seconds")})
+        self.statusBar().showMessage(f"Log AutoPlay iniciado: {self.auto_decision_log_path}")
+
+    def finalize_auto_decision_log(self, reason: str) -> None:
+        if self.auto_decision_log_path is None:
+            return
+        self.write_auto_decision_log(
+            {
+                "event": "session_end",
+                "time": datetime.now().isoformat(timespec="seconds"),
+                "reason": reason,
+                "events": self.auto_decision_log_events,
+            },
+            force=True,
+        )
+        self.statusBar().showMessage(f"Log AutoPlay salvo: {self.auto_decision_log_path}")
+        self.auto_decision_log_path = None
+        self.auto_decision_log_last_signature = ""
+        self.auto_decision_log_last_at = 0.0
+        self.auto_decision_log_events = 0
+        self.auto_no_hand_frames = 0
+
+    def write_auto_decision_log(self, payload: dict, force: bool = False) -> None:
+        if self.auto_decision_log_path is None:
+            return
+        payload.setdefault("time", datetime.now().isoformat(timespec="milliseconds"))
+        try:
+            with self.auto_decision_log_path.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            if not force:
+                self.auto_decision_log_events += 1
+        except OSError as error:
+            self.log_debug(f"Falha ao gravar log AutoPlay: {type(error).__name__}: {error}")
+
+    def log_auto_decision_frame(
+        self,
+        state: HandState,
+        riichi_button_visible: bool,
+        win_button_visible: bool,
+        chii_choose_visible: bool,
+    ) -> None:
+        if self.auto_decision_log_path is None:
+            self.start_auto_decision_log()
+        hand_count = len(state.hand_tiles)
+        if hand_count < 5 and not (state.chii_button_visible or state.pon_button_visible or state.kan_button_visible):
+            self.auto_no_hand_frames += 1
+            if self.auto_no_hand_frames >= 10:
+                self.finalize_auto_decision_log("hand_disappeared")
+            return
+        self.auto_no_hand_frames = 0
+
+        visible_actions = {
+            "Chii": state.chii_button_visible,
+            "Pon": state.pon_button_visible,
+            "Kan": state.kan_button_visible,
+            "Riichi": riichi_button_visible,
+            "Ron/Tsumo": win_button_visible,
+            "ChiiChoose": chii_choose_visible,
+        }
+        decisions = [decision.compact for decision in state.call_decisions]
+        signature = "|".join(
+            [
+                ",".join(tile.compact for tile in state.hand_tiles),
+                ",".join(decisions),
+                ",".join(tile.compact for tile in state.discard_candidates[:4]),
+                str(visible_actions),
+            ]
+        )
+        now = time.perf_counter()
+        has_call_surface = any(visible_actions.values())
+        if signature == self.auto_decision_log_last_signature and now - self.auto_decision_log_last_at < 1.0 and not has_call_surface:
+            return
+        self.auto_decision_log_last_signature = signature
+        self.auto_decision_log_last_at = now
+        self.write_auto_decision_log(
+            {
+                "event": "decision_frame",
+                "hand": [tile.compact for tile in state.hand_tiles],
+                "open_melds": [meld.compact for meld in state.open_melds],
+                "missing_count": state.missing_count,
+                "player_winds": state.player_winds,
+                "visible_actions": visible_actions,
+                "call_decisions": [
+                    {
+                        "action": decision.action,
+                        "recommended": decision.recommended,
+                        "confidence": decision.confidence,
+                        "option": decision.option,
+                        "reason": decision.reason,
+                    }
+                    for decision in state.call_decisions
+                ],
+                "yaku": [
+                    {"key": match.yaku.key, "name": match.yaku.name, "confidence": match.confidence, "reason": match.reason}
+                    for match in state.likely_yaku
+                ],
+                "helpful_tiles": [
+                    {"tile": need.tile.compact, "score": need.score, "reason": need.reason}
+                    for need in state.helpful_missing_tiles[:8]
+                ],
+                "own_discards": [tile.compact for tile in state.discarded_by_player.get("principal", [])],
+                "current_furiten_waits": [
+                    {"tile": need.tile.compact, "reason": need.reason}
+                    for need in state.current_furiten_waits
+                ],
+                "furiten_waits_after_discards": [
+                    {"tile": need.tile.compact, "reason": need.reason}
+                    for need in state.furiten_waits
+                ],
+                "discard_candidates": [tile.compact for tile in state.discard_candidates[:4]],
+                "discard_explanations": [
+                    {
+                        "tile": explanation.tile.compact,
+                        "rank": explanation.rank,
+                        "color": explanation.color,
+                        "pressure": explanation.pressure,
+                        "reasons": list(explanation.reasons),
+                        "safeguards": list(explanation.safeguards),
+                        "visible_count": explanation.visible_count,
+                        "remaining_count": explanation.remaining_count,
+                        "shanten_after": explanation.shanten_after,
+                        "ukeire_after": explanation.ukeire_after,
+                    }
+                    for explanation in state.discard_explanations
+                ],
+                "pon_context": {
+                    "source_player": state.pon_source_player,
+                    "discard": state.pon_discard.compact if state.pon_discard else None,
+                    "options": [option.compact for option in state.pon_options],
+                },
+                "chii_context": {
+                    "discard": state.chii_discard.compact if state.chii_discard else None,
+                    "options": [option.compact for option in state.chii_options],
+                },
+                "kan_options": [option.compact for option in state.kan_options],
+            }
+        )
+
+    def detect_chii_option_clusters(self, detections: list) -> list[ChiiOptionCluster]:
+        region = self.configured_region_rect("chii_options")
+        candidates = []
+        for detection in detections:
+            tile = tile_from_name(detection.name)
+            if tile is None:
+                continue
+            if not region.contains(QPointF(detection.center_x, detection.center_y)):
+                continue
+            if detection.width <= 8 or detection.height <= 12:
+                continue
+            candidates.append((detection, tile))
+        if len(candidates) < 2:
+            return []
+
+        candidates = self.deduplicate_chii_option_detections(candidates)
+        candidates.sort(key=lambda item: item[0].center_x)
+        clusters = []
+        for index in range(0, len(candidates) - 1, 2):
+            pair = candidates[index : index + 2]
+            if len(pair) != 2:
+                continue
+            detections_pair = [item[0] for item in pair]
+            tiles = tuple(item[1] for item in pair)
+            signature = tuple(sorted(tile.base_key for tile in tiles))
+            center_x = sum(item.center_x for item in detections_pair) / 2
+            center_y = sum(item.center_y for item in detections_pair) / 2
+            confidence = sum(item.confidence for item in detections_pair) / 2
+            clusters.append(ChiiOptionCluster(tiles, center_x, center_y, signature, confidence))
+        return clusters
+
+    @staticmethod
+    def deduplicate_chii_option_detections(candidates: list[tuple[object, Tile]]) -> list[tuple[object, Tile]]:
+        accepted: list[tuple[object, Tile]] = []
+        for detection, tile in sorted(candidates, key=lambda item: item[0].confidence, reverse=True):
+            duplicate = False
+            for existing, existing_tile in accepted:
+                if existing_tile.base_key != tile.base_key:
+                    continue
+                if abs(existing.center_x - detection.center_x) <= max(existing.width, detection.width) * 0.35:
+                    duplicate = True
+                    break
+            if not duplicate:
+                accepted.append((detection, tile))
+        return accepted
+
+    def stable_chii_option_clusters(self) -> list[ChiiOptionCluster]:
+        signature_counts = Counter(
+            cluster.signature
+            for frame in self.chii_option_history
+            for cluster in frame
+        )
+        latest = self.chii_option_history[-1] if self.chii_option_history else []
+        stable = [cluster for cluster in latest if signature_counts[cluster.signature] >= 2]
+        return stable or latest
+
+    def best_chii_option_cluster(self, state: HandState, clusters: list[ChiiOptionCluster]) -> ChiiOptionCluster | None:
+        best_cluster = None
+        best_score = -1
+        for cluster in clusters:
+            option = self.match_chii_option_for_cluster(state, cluster)
+            if option is None:
+                continue
+            simulated = simulate_call("Chii", state, option)
+            if simulated is None:
+                continue
+            simulated.likely_yaku = likely_yaku(simulated)
+            score = call_plan_score_from_plans(call_candidate_plans(simulated))
+            score += round(cluster.confidence * 4)
+            if score > best_score:
+                best_score = score
+                best_cluster = cluster
+        return best_cluster
+
+    @staticmethod
+    def match_chii_option_for_cluster(state: HandState, cluster: ChiiOptionCluster):
+        cluster_counts = Counter(cluster.signature)
+        for option in state.chii_options:
+            option_counts = Counter(tile.base_key for tile in option.needed_tiles)
+            if option_counts == cluster_counts:
+                return option
+        return None
 
     def remember_auto_context(
         self,
@@ -1628,6 +2296,28 @@ class MainWindow(QMainWindow):
             {"kind": "action", "action": action},
         )
 
+    def click_skip_button(self, skipped_actions: list[str]) -> bool:
+        probe = self.skip_button_probe()
+        if probe is None:
+            self.log_debug("Auto: Skip indicado, mas pixel de Skip nao esta configurado.")
+            return False
+        return self.click_normalized_point(
+            float(probe["x"]),
+            float(probe["y"]),
+            {"kind": "skip", "skipped_actions": tuple(skipped_actions)},
+        )
+
+    def skip_button_probe(self) -> dict | None:
+        active_probe = self.active_button_probe(self.latest_auto_image or self.last_capture, "Skip")
+        if active_probe is not None:
+            return active_probe
+        probes = self.app_config.get("pixel_probes", {})
+        for key in self.button_probe_keys("Skip"):
+            probe = probes.get(key)
+            if probe is not None:
+                return probe
+        return None
+
     def click_best_discard(self, detections: list, state: HandState) -> bool:
         discard_tile = self.next_auto_discard_candidate(state)
         if discard_tile is None:
@@ -1648,12 +2338,24 @@ class MainWindow(QMainWindow):
             self.log_debug(f"Auto: nao encontrou box clicavel para {discard_tile.compact}.")
             return False
 
-        target = max(candidates, key=lambda item: item.center_y)
+        target = self.best_discard_click_detection(candidates, discard_tile)
         return self.click_normalized_point(
             target.center_x,
             target.center_y,
             {"kind": "discard", "tile_key": target_key, "tile_label": discard_tile.compact},
         )
+
+    @staticmethod
+    def best_discard_click_detection(candidates: list, discard_tile: Tile):
+        if discard_tile.is_suited and int(discard_tile.value) == 5 and not discard_tile.red:
+            normal_candidates = [
+                detection
+                for detection in candidates
+                if (tile := tile_from_name(detection.name)) is not None and not tile.red
+            ]
+            if normal_candidates:
+                return max(normal_candidates, key=lambda item: item.center_y)
+        return max(candidates, key=lambda item: item.center_y)
 
     def next_auto_discard_candidate(self, state: HandState) -> Tile | None:
         if not state.discard_candidates:
@@ -1742,6 +2444,10 @@ class MainWindow(QMainWindow):
                     "at": self.auto_last_click_at,
                     "frames": 0,
                 }
+            if context.get("kind") == "action" and context.get("action") in {"Chii", "Pon", "Kan"}:
+                self.auto_call_settle_until = self.auto_last_click_at + self.auto_call_settle_seconds
+            if context.get("kind") == "chii_option":
+                self.auto_call_settle_until = self.auto_last_click_at + self.auto_call_settle_seconds
             self.statusBar().showMessage("Auto: clique executado.")
             self.log_debug("Auto: clique executado apos atraso aleatorio.")
         finally:
@@ -1789,7 +2495,40 @@ class MainWindow(QMainWindow):
                 for decision in state.call_decisions
                 if decision.recommended
             }
-            return bool(visible_actions.get(action) and action in recommended_actions)
+            return bool(
+                visible_actions.get(action)
+                and action in recommended_actions
+                and self.active_button_probe(self.latest_auto_image or self.last_capture, str(action)) is not None
+            )
+        if kind == "skip":
+            state = self.latest_auto_state
+            if state is None:
+                return False
+            visible_actions = {
+                "Chii": state.chii_button_visible,
+                "Pon": state.pon_button_visible,
+                "Kan": state.kan_button_visible,
+            }
+            skipped_actions = tuple(context.get("skipped_actions") or ())
+            if not skipped_actions or not all(visible_actions.get(action) for action in skipped_actions):
+                return False
+            recommended_actions = {
+                decision.action
+                for decision in state.call_decisions
+                if decision.recommended
+            }
+            return (
+                not any(action in recommended_actions for action in ("Kan", "Pon", "Chii"))
+                and self.skip_button_probe() is not None
+            )
+        if kind == "chii_option":
+            if self.latest_auto_image is None or not self.detect_chii_choose_header(self.latest_auto_image):
+                return False
+            signature = tuple(context.get("signature") or ())
+            if not signature:
+                return False
+            clusters = self.detect_chii_option_clusters(self.latest_auto_detections)
+            return any(cluster.signature == signature for cluster in clusters)
         return True
 
     def restart_auto_from_latest_context(self) -> None:
@@ -2320,6 +3059,22 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("Falha ao salvar screenshot.")
 
+    def auto_capture_screenshot(self) -> None:
+        if not self.capture_mode_checkbox.isChecked():
+            return
+        self.capture_once(force=True)
+        if self.last_capture is None:
+            self.log_debug("Modo captura: nenhum frame disponivel.")
+            return
+        RAW_DATASET_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = RAW_DATASET_DIR / f"mahjong_soul_auto_{timestamp}.png"
+        if self.last_capture.save(str(path), "PNG"):
+            self.statusBar().showMessage(f"Modo captura: screenshot salvo em {path}")
+            self.log_debug(f"Modo captura salvou {path}")
+        else:
+            self.statusBar().showMessage("Modo captura: falha ao salvar screenshot.")
+
     def open_annotator(self) -> None:
         if self.annotator_window is None:
             self.annotator_window = AnnotatorWindow()
@@ -2352,6 +3107,7 @@ class MainWindow(QMainWindow):
         self.capture_once()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.finalize_auto_decision_log("app_close")
         self.screen_capture.close()
         super().closeEvent(event)
 

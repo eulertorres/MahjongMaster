@@ -2,82 +2,84 @@
   "version": 1,
   "show_regions_overlay": false,
   "predict_fps": 30.0,
-  "predict_conf": 0.4,
+  "predict_conf": 0.30000000000000004,
   "debug_enabled": false,
-  "auto_mouse_delay_min": 0.4,
-  "auto_mouse_delay_max": 1.2,
-  "auto_click_delay_min": 1.0,
-  "auto_click_delay_max": 3.0,
+  "capture_mode_enabled": false,
+  "auto_mouse_delay_min": 0.2,
+  "auto_mouse_delay_max": 0.4,
+  "auto_click_delay_min": 0.3,
+  "auto_click_delay_max": 0.4,
+  "auto_call_settle_seconds": 2.000000000000001,
   "pixel_probes": {
     "turn_left": {
       "label": "Vez esquerda",
-      "x": 793,
-      "y": 461,
-      "color": "#fffa78",
-      "tolerance": 45,
+      "x": 701,
+      "y": 385,
+      "color": "#fff676",
+      "tolerance": 25,
       "enabled": true
     },
     "turn_top": {
       "label": "Vez frente",
-      "x": 796,
-      "y": 270,
-      "color": "#FBBF24",
-      "tolerance": 45,
+      "x": 799,
+      "y": 327,
+      "color": "#fffd6c",
+      "tolerance": 30,
       "enabled": true
     },
     "turn_right": {
       "label": "Vez direita",
-      "x": 1016,
-      "y": 395,
-      "color": "#FBBF24",
-      "tolerance": 45,
+      "x": 893,
+      "y": 387,
+      "color": "#fff777",
+      "tolerance": 20,
       "enabled": true
     },
     "turn_player": {
       "label": "Vez jogador",
-      "x": 0,
-      "y": 622,
-      "color": "#3c3e45",
+      "x": 803,
+      "y": 459,
+      "color": "#fff676",
       "tolerance": 45,
       "enabled": true
     },
     "east_left": {
       "label": "Leste esquerda",
-      "x": 520,
-      "y": 360,
-      "color": "#E11D48",
+      "x": 705,
+      "y": 310,
+      "color": "#be353d",
       "tolerance": 45,
       "enabled": true
     },
     "east_top": {
       "label": "Leste frente",
-      "x": 796,
-      "y": 255,
-      "color": "#E11D48",
+      "x": 914,
+      "y": 319,
+      "color": "#be353d",
       "tolerance": 45,
       "enabled": true
     },
     "east_right": {
       "label": "Leste direita",
-      "x": 1035,
-      "y": 360,
-      "color": "#E11D48",
+      "x": 896,
+      "y": 472,
+      "color": "#be353d",
       "tolerance": 45,
       "enabled": true
     },
     "east_player": {
       "label": "Leste jogador",
-      "x": 796,
-      "y": 485,
-      "color": "#E11D48",
+      "x": 701,
+      "y": 461,
+      "color": "#be353d",
       "tolerance": 45,
       "enabled": true
     },
     "button_chii_1": {
       "label": "Chii 1",
-      "x": 610,
-      "y": 700,
-      "color": "#22C55E",
+      "x": 804,
+      "y": 730,
+      "color": "#cde4cb",
       "tolerance": 45,
       "enabled": true
     },
@@ -91,10 +93,10 @@
     },
     "button_pon_1": {
       "label": "Pon 1",
-      "x": 610,
-      "y": 700,
-      "color": "#06B6D4",
-      "tolerance": 45,
+      "x": 854,
+      "y": 727,
+      "color": "#bfeade",
+      "tolerance": 25,
       "enabled": true
     },
     "button_pon_2": {
@@ -123,10 +125,10 @@
     },
     "button_riichi_1": {
       "label": "Riichi 1",
-      "x": 610,
-      "y": 700,
-      "color": "#F97316",
-      "tolerance": 45,
+      "x": 862,
+      "y": 735,
+      "color": "#9f4c15",
+      "tolerance": 35,
       "enabled": true
     },
     "button_riichi_2": {
@@ -155,9 +157,9 @@
     },
     "button_tsumo_1": {
       "label": "Tsumo 1",
-      "x": 610,
-      "y": 700,
-      "color": "#E11D48",
+      "x": 835,
+      "y": 738,
+      "color": "#93264a",
       "tolerance": 45,
       "enabled": true
     },
@@ -171,9 +173,9 @@
     },
     "button_skip_1": {
       "label": "Skip 1",
-      "x": 990,
-      "y": 700,
-      "color": "#94A3B8",
+      "x": 1081,
+      "y": 738,
+      "color": "#5b5a5a",
       "tolerance": 45,
       "enabled": false
     },
@@ -184,6 +186,14 @@
       "color": "#94A3B8",
       "tolerance": 45,
       "enabled": false
+    },
+    "chii_choose_header": {
+      "label": "Header escolher Chii",
+      "x": 795,
+      "y": 523,
+      "color": "#7F2430",
+      "tolerance": 55,
+      "enabled": true
     }
   },
   "regions": {
@@ -207,10 +217,10 @@
     },
     "left_opponent_tiles": {
       "label": "Mao/chamadas esquerda",
-      "x": 138,
-      "y": 110,
-      "w": 184,
-      "h": 438,
+      "x": 132,
+      "y": 120,
+      "w": 221,
+      "h": 616,
       "color": "#F59E0B",
       "enabled": true
     },
@@ -225,20 +235,29 @@
     },
     "right_opponent_tiles": {
       "label": "Mao/chamadas direita",
-      "x": 1261,
-      "y": 197,
-      "w": 269,
-      "h": 542,
+      "x": 1259,
+      "y": 129,
+      "w": 292,
+      "h": 641,
       "color": "#38BDF8",
       "enabled": true
     },
     "dora_indicators": {
       "label": "Doras",
       "x": 20,
-      "y": 58,
-      "w": 240,
-      "h": 86,
+      "y": 70,
+      "w": 242,
+      "h": 84,
       "color": "#F43F5E",
+      "enabled": true
+    },
+    "chii_options": {
+      "label": "Opcoes Chii",
+      "x": 538,
+      "y": 531,
+      "w": 515,
+      "h": 170,
+      "color": "#F97316",
       "enabled": true
     },
     "discard_player": {
@@ -261,8 +280,8 @@
     },
     "discard_top": {
       "label": "Descartes frente",
-      "x": 664,
-      "y": 147,
+      "x": 662,
+      "y": 141,
       "w": 268,
       "h": 155,
       "color": "#A855F7",

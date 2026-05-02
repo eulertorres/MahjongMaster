@@ -33,10 +33,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "predict_fps": 30.0,
     "predict_conf": 0.50,
     "debug_enabled": False,
+    "capture_mode_enabled": False,
     "auto_mouse_delay_min": 0.4,
     "auto_mouse_delay_max": 1.2,
     "auto_click_delay_min": 3.0,
     "auto_click_delay_max": 5.0,
+    "auto_call_settle_seconds": 1.6,
     "pixel_probes": {
         "turn_left": {"label": "Vez esquerda", "x": 494, "y": 395, "color": "#FBBF24", "tolerance": 45, "enabled": True},
         "turn_top": {"label": "Vez frente", "x": 796, "y": 270, "color": "#FBBF24", "tolerance": 45, "enabled": True},
@@ -60,6 +62,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "button_tsumo_2": {"label": "Tsumo 2", "x": 770, "y": 700, "color": "#E11D48", "tolerance": 45, "enabled": True},
         "button_skip_1": {"label": "Skip 1", "x": 990, "y": 700, "color": "#94A3B8", "tolerance": 45, "enabled": False},
         "button_skip_2": {"label": "Skip 2", "x": 1120, "y": 700, "color": "#94A3B8", "tolerance": 45, "enabled": False},
+        "chii_choose_header": {"label": "Header escolher Chii", "x": 795, "y": 523, "color": "#7F2430", "tolerance": 55, "enabled": True},
     },
     "regions": {
         "player_hand": {
@@ -114,6 +117,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "w": 260,
             "h": 150,
             "color": "#F43F5E",
+            "enabled": True,
+        },
+        "chii_options": {
+            "label": "Opcoes Chii",
+            "x": 505,
+            "y": 535,
+            "w": 680,
+            "h": 180,
+            "color": "#F97316",
             "enabled": True,
         },
         "discard_player": {
@@ -194,6 +206,7 @@ def normalize_config(config: dict[str, Any]) -> None:
     config["predict_fps"] = clamp_float(config.get("predict_fps", 30.0), 0.2, 60.0)
     config["predict_conf"] = clamp_float(config.get("predict_conf", 0.50), 0.01, 0.99)
     config["debug_enabled"] = bool(config.get("debug_enabled", False))
+    config["capture_mode_enabled"] = bool(config.get("capture_mode_enabled", False))
     mouse_min = clamp_float(config.get("auto_mouse_delay_min", 0.4), 0.0, 30.0)
     mouse_max = clamp_float(config.get("auto_mouse_delay_max", 1.2), 0.0, 30.0)
     if mouse_min > mouse_max:
@@ -206,6 +219,7 @@ def normalize_config(config: dict[str, Any]) -> None:
     config["auto_mouse_delay_max"] = mouse_max
     config["auto_click_delay_min"] = click_min
     config["auto_click_delay_max"] = click_max
+    config["auto_call_settle_seconds"] = clamp_float(config.get("auto_call_settle_seconds", 1.6), 0.0, 10.0)
     regions = config.setdefault("regions", {})
     for key in OBSOLETE_REGION_KEYS:
         regions.pop(key, None)

@@ -109,11 +109,19 @@ class GameAnalyzer:
                 discarded.append(tile)
 
         chii_source_player = "esquerda" if chii_button_visible else call_source_player
-        call_source_detections = discarded_detections_by_player.get(chii_source_player or call_source_player or "", [])
-        call_latest = self.latest_discard_for_player(chii_source_player or call_source_player or "", call_source_detections)
+        resolved_call_source = chii_source_player or call_source_player
+        call_source_detections = discarded_detections_by_player.get(resolved_call_source or "", [])
+        call_latest = self.latest_discard_for_player(resolved_call_source or "", call_source_detections)
+        if call_latest is None and (pon_button_visible or kan_button_visible):
+            call_latest = self.latest_opponent_discard(discarded_detections_by_player)
+            if call_latest is not None:
+                for player, player_detections in discarded_detections_by_player.items():
+                    if any(detection is call_latest for detection in player_detections):
+                        resolved_call_source = player
+                        break
         call_discard = tile_from_name(call_latest.name) if call_latest is not None else None
         chii_discard = call_discard if chii_button_visible else None
-        pon_source_player = call_source_player if call_source_player != "principal" else None
+        pon_source_player = resolved_call_source if resolved_call_source != "principal" else None
         pon_option_source = pon_source_player
         pon_discard = call_discard if pon_source_player else None
 
@@ -294,6 +302,9 @@ class GameAnalyzer:
         x1, y1, x2, y2 = bounds
         return x1 <= detection.center_x <= x2 and y1 <= detection.center_y <= y2
 
+    def is_dora_indicator_detection(self, detection: TileDetection) -> bool:
+        return self.contains_detection(self.region_bounds("dora_indicators"), detection)
+
     def discarded_area_tiles(self, detections: list[TileDetection]) -> list[TileDetection]:
         configured = self.configured_discard_regions()
         if configured:
@@ -301,6 +312,7 @@ class GameAnalyzer:
                 detection
                 for detection in detections
                 if any(self.contains_detection(bounds, detection) for bounds in configured.values())
+                and not self.is_dora_indicator_detection(detection)
                 and detection.width > 8
                 and detection.height > 12
                 and tile_from_name(detection.name) is not None
@@ -317,6 +329,7 @@ class GameAnalyzer:
             if x_min <= detection.center_x <= x_max
             and y_min <= detection.center_y <= y_max
             and detection.center_y < player_y
+            and not self.is_dora_indicator_detection(detection)
             and detection.width > 8
             and detection.height > 12
             and tile_from_name(detection.name) is not None

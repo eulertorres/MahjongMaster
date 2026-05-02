@@ -9,6 +9,12 @@ from typing import Callable, Iterable
 
 SUITS = ("man", "pin", "sou")
 WINDS = ("wind_east", "wind_south", "wind_west", "wind_north")
+WIND_VALUE_TO_KEY = {
+    "east": "wind_east",
+    "south": "wind_south",
+    "west": "wind_west",
+    "north": "wind_north",
+}
 DRAGONS = ("dragon_white", "dragon_green", "dragon_red")
 HONORS = (*WINDS, *DRAGONS)
 TERMINAL_NUMBERS = {1, 9}
@@ -117,6 +123,20 @@ class TileNeed:
 
 
 @dataclass(frozen=True)
+class DiscardExplanation:
+    tile: Tile
+    rank: int
+    color: str
+    pressure: int
+    shanten_after: int
+    ukeire_after: int
+    visible_count: int
+    remaining_count: int
+    reasons: tuple[str, ...]
+    safeguards: tuple[str, ...] = tuple()
+
+
+@dataclass(frozen=True)
 class ChiiOption:
     discarded_tile: Tile
     needed_tiles: tuple[Tile, Tile]
@@ -181,7 +201,9 @@ class HandState:
     missing_count: int = 0
     discard_candidates: list[Tile] = field(default_factory=list)
     discard_reason: str = ""
+    discard_explanations: list[DiscardExplanation] = field(default_factory=list)
     furiten_waits: list[TileNeed] = field(default_factory=list)
+    current_furiten_waits: list[TileNeed] = field(default_factory=list)
     discarded_tiles: list[Tile] = field(default_factory=list)
     discarded_by_player: dict[str, list[Tile]] = field(default_factory=dict)
     opponent_open_tiles: dict[str, list[Tile]] = field(default_factory=dict)
@@ -254,6 +276,10 @@ class HandState:
             (f"{need.tile.compact} {need.score}% ({need.reason})" for need in self.furiten_waits[:6]),
             group_size=3,
         )
+        current_furiten = self.format_grouped(
+            (f"{need.tile.compact} {need.score}% ({need.reason})" for need in self.current_furiten_waits[:6]),
+            group_size=3,
+        )
         best_discard = self.format_grouped((tile.compact for tile in self.discard_candidates[:4]), group_size=4)
         discard_reason = self.discard_reason or "menor contribuicao estimada para fechar a mao"
 
@@ -275,6 +301,8 @@ class HandState:
         if self.blocked_yaku:
             parts.extend(["[YAKU] Bloqueados:", f"  {blocked}"])
         parts.extend(["[DESCARTE] Melhor descarte agora:", f"  {best_discard}", f"  Motivo: {discard_reason}"])
+        if current_furiten:
+            parts.extend(["[FURITEN ATUAL] Esperas bloqueadas:", f"  {current_furiten}"])
         if furiten:
             parts.extend(["[FURITEN] Esperas arriscadas:", f"  {furiten}"])
         parts.extend(["[FALTAM] Pecas que mais ajudam:", f"  {needs}"])
@@ -535,6 +563,16 @@ def has_triplet_of(state: HandState, base_keys: set[str]) -> bool:
     return any(counts[key] >= 3 for key in base_keys)
 
 
+def seat_wind_key(state: HandState) -> str | None:
+    wind = str(state.player_winds.get("principal", "")).lower()
+    return WIND_VALUE_TO_KEY.get(wind)
+
+
+def has_seat_wind_triplet(state: HandState) -> bool:
+    key = seat_wind_key(state)
+    return bool(key and has_triplet_of(state, {key}))
+
+
 def all_tiles_simple(state: HandState) -> bool:
     tiles = state.all_known_tiles
     return bool(tiles) and all(tile.is_simple for tile in tiles)
@@ -732,7 +770,7 @@ def top_yaku_plans(state: HandState, limit: int = 3) -> list[YakuPlan]:
 
     candidates.extend(flush_candidates(tiles))
     candidates.extend(dragon_candidates(tiles, state.discarded_tiles))
-    candidates.extend(wind_candidates(tiles, state.discarded_tiles))
+    candidates.extend(wind_candidates(state))
     candidates.extend(seven_pairs_candidate(state))
     candidates.extend(pure_straight_candidates(tiles))
 
@@ -758,15 +796,16 @@ def top_yaku_plans(state: HandState, limit: int = 3) -> list[YakuPlan]:
 
 
 def select_display_plans(plans: list[YakuPlan], base_limit: int = 3) -> list[YakuPlan]:
-    complete_count = sum(1 for plan in plans if plan.confidence >= 100)
-    display_limit = max(base_limit, complete_count + base_limit)
-    return plans[:display_limit]
+    strong = [plan for plan in plans if plan.confidence >= 50]
+    if strong:
+        return strong
+    return plans[:base_limit]
 
 
 def confirmed_yaku_matches(state: HandState) -> list[YakuMatch]:
     matches: list[YakuMatch] = []
     for yaku in YAKU_REGISTRY:
-        if not yaku.enabled or yaku.matcher is None:
+        if not yaku.enabled or yaku.matcher is None or yaku.situational:
             continue
         if yaku_block_reason(yaku.key, state):
             continue
@@ -786,7 +825,8 @@ def confirmed_useful_keys(state: HandState, yaku_key: str) -> frozenset[str]:
     if yaku_key in {"yakuhai_dragon", "haku", "hatsu", "chun"}:
         return frozenset(tile.base_key for tile in tiles if tile.suit == "dragon")
     if yaku_key == "seat_wind":
-        return frozenset(tile.base_key for tile in tiles if tile.suit == "wind")
+        key = seat_wind_key(state)
+        return frozenset({key}) if key and any(tile.base_key == key for tile in tiles) else frozenset()
     if yaku_key == "prevalent_wind":
         return frozenset(tile.base_key for tile in tiles if tile.base_key == "wind_east")
     return frozenset(tile.base_key for tile in tiles if tile.base_key)
@@ -929,11 +969,21 @@ def dragon_candidates(tiles: list[Tile], discarded_tiles: list[Tile]) -> list[Ya
     return candidates
 
 
-def wind_candidates(tiles: list[Tile], discarded_tiles: list[Tile]) -> list[YakuPlan]:
+def wind_candidates(state: HandState) -> list[YakuPlan]:
+    tiles = state.all_known_tiles
     counts = canonical_counter(tiles)
-    discarded_counts = canonical_counter(discarded_tiles)
+    discarded_counts = canonical_counter(state.discarded_tiles)
     candidates = []
-    for wind_key in WINDS:
+    seat_key = seat_wind_key(state)
+    if seat_key and counts[seat_key] > 0:
+        remaining_unseen = max(0, 4 - discarded_counts[seat_key])
+        needed = max(0, 3 - counts[seat_key])
+        if needed <= remaining_unseen:
+            penalty = discarded_counts[seat_key] * 12
+            confidence = max(0, min(92, 35 + counts[seat_key] * 22 - penalty))
+            candidates.append(YakuPlan("seat_wind", confidence, frozenset({seat_key}), wanted_keys=frozenset({seat_key})))
+
+    for wind_key in ("wind_east",):
         count = counts[wind_key]
         if count == 0:
             continue
@@ -943,9 +993,7 @@ def wind_candidates(tiles: list[Tile], discarded_tiles: list[Tile]) -> list[Yaku
             continue
         penalty = discarded_counts[wind_key] * 12
         confidence = max(0, min(92, 35 + count * 22 - penalty))
-        candidates.append(YakuPlan("seat_wind", confidence, frozenset({wind_key}), wanted_keys=frozenset({wind_key})))
-        if wind_key == "wind_east":
-            candidates.append(YakuPlan("prevalent_wind", confidence, frozenset({wind_key}), wanted_keys=frozenset({wind_key})))
+        candidates.append(YakuPlan("prevalent_wind", confidence, frozenset({wind_key}), wanted_keys=frozenset({wind_key})))
     return candidates
 
 
@@ -1011,7 +1059,8 @@ def missing_keys_for_yaku(yaku_key: str, state: HandState) -> frozenset[str]:
     if yaku_key == "yakuhai_dragon":
         return frozenset(key for key in DRAGONS if 0 < counts[key] < 3)
     if yaku_key == "seat_wind":
-        return frozenset(key for key in WINDS if 0 < counts[key] < 3)
+        key = seat_wind_key(state)
+        return frozenset({key}) if key and 0 < counts[key] < 3 else frozenset()
     if yaku_key == "prevalent_wind":
         return frozenset({"wind_east"}) if 0 < counts["wind_east"] < 3 else frozenset()
     if yaku_key == "ittsu":
@@ -1218,7 +1267,7 @@ YAKU_REGISTRY: list[Yaku] = [
     Yaku("iipeikou", "Pure Double Sequence", closed_only=True, matcher=has_iipeikou_like_shape),
     Yaku("ryanpeikou", "Twice Pure Double Sequence", closed_only=True, matcher=has_twice_pure_double_sequence),
     Yaku("tanyao", "All Simples", matcher=has_all_simples_shape),
-    Yaku("seat_wind", "Seat Wind", matcher=lambda state: has_triplet_of(state, set(WINDS))),
+    Yaku("seat_wind", "Seat Wind", matcher=has_seat_wind_triplet),
     Yaku("prevalent_wind", "Prevalent Wind", matcher=lambda state: has_triplet_of(state, {"wind_east"})),
     Yaku("yakuhai_dragon", "Dragons", matcher=lambda state: has_triplet_of(state, set(DRAGONS))),
     Yaku("haku", "White Dragon", matcher=lambda state: has_triplet_of(state, {"dragon_white"})),
@@ -1294,6 +1343,7 @@ def likely_yaku(state: HandState) -> list[YakuMatch]:
             top_yaku_plans(state, limit=3),
         )
     update_furiten_summary(state)
+    state.discard_explanations = explain_discard_candidates(state, top_yaku_plans(state, limit=3))
     return matches
 
 
@@ -1320,9 +1370,8 @@ def own_discard_keys(state: HandState) -> set[str]:
     return set(canonical_counter(state.discarded_by_player.get("principal", [])).keys())
 
 
-def winning_wait_keys_after_discard(state: HandState, discarded_tile: Tile) -> frozenset[str]:
-    remaining = remove_one_tile_instance(state.hand_tiles, discarded_tile)
-    if standard_shanten_number(remaining, state.open_melds) != 0:
+def winning_wait_keys_for_hand(state: HandState, hand_tiles: list[Tile]) -> frozenset[str]:
+    if standard_shanten_number(hand_tiles, state.open_melds) != 0:
         return frozenset()
 
     seen_counts = canonical_counter(state.all_visible_tiles)
@@ -1331,9 +1380,21 @@ def winning_wait_keys_after_discard(state: HandState, discarded_tile: Tile) -> f
         if seen_counts[key] >= 4:
             continue
         tile = representative_tile(key)
-        if standard_shanten_number([*remaining, tile], state.open_melds) == -1:
+        if standard_shanten_number([*hand_tiles, tile], state.open_melds) == -1:
             waits.append(key)
     return frozenset(waits)
+
+
+def current_furiten_wait_keys(state: HandState) -> frozenset[str]:
+    own_keys = own_discard_keys(state)
+    if not own_keys:
+        return frozenset()
+    return winning_wait_keys_for_hand(state, state.hand_tiles) & own_keys
+
+
+def winning_wait_keys_after_discard(state: HandState, discarded_tile: Tile) -> frozenset[str]:
+    remaining = remove_one_tile_instance(state.hand_tiles, discarded_tile)
+    return winning_wait_keys_for_hand(state, remaining)
 
 
 def furiten_wait_keys_after_discard(state: HandState, discarded_tile: Tile) -> frozenset[str]:
@@ -1351,20 +1412,33 @@ def furiten_discard_penalty(state: HandState, discarded_tile: Tile) -> int:
 
 
 def update_furiten_summary(state: HandState) -> None:
+    current_waits = current_furiten_wait_keys(state)
+    state.current_furiten_waits = [
+        TileNeed(
+            representative_tile(key),
+            100,
+            "ja esta nos seus descartes; a mao atual esta em furiten",
+        )
+        for key in sorted(current_waits)
+    ]
+
     if not state.discard_candidates:
         state.furiten_waits = []
         return
 
-    waits = furiten_wait_keys_after_discard(state, state.discard_candidates[0])
+    wait_reasons: dict[str, list[str]] = {}
+    for discarded_tile in state.discard_candidates[:4]:
+        for key in sorted(furiten_wait_keys_after_discard(state, discarded_tile)):
+            wait_reasons.setdefault(key, []).append(f"apos descartar {discarded_tile.compact}")
     state.furiten_waits = [
         TileNeed(
             representative_tile(key),
             100,
-            "esta nos seus descartes; ron ficaria em furiten",
+            f"esta nos seus descartes; {'; '.join(reasons[:3])}",
         )
-        for key in sorted(waits)
+        for key, reasons in sorted(wait_reasons.items())
     ]
-    if state.furiten_waits and "furiten" not in state.discard_reason.lower():
+    if (state.current_furiten_waits or state.furiten_waits) and "furiten" not in state.discard_reason.lower():
         state.discard_reason = f"{state.discard_reason}; risco de furiten se aceitar esta espera"
 
 
@@ -1386,6 +1460,8 @@ def completion_discard_candidates(state: HandState) -> list[Tile]:
         return []
 
     dora_keys = dora_base_keys(state)
+    counts = canonical_counter(tiles)
+    visible_counts = canonical_counter(state.all_visible_tiles)
     non_dora_exists = any(tile.base_key not in dora_keys for tile in tiles)
     non_red_exists = any(not tile.red for tile in tiles)
     scored: list[tuple[int, int, int, int, int, Tile]] = []
@@ -1401,6 +1477,8 @@ def completion_discard_candidates(state: HandState) -> list[Tile]:
             protection_penalty += 80
         if tile.base_key in dora_keys and non_dora_exists:
             protection_penalty += 70
+        if tile.is_honor and counts[tile.base_key] >= 2 and max(0, 4 - visible_counts[tile.base_key]) > 0:
+            protection_penalty += 90
         scored.append((shanten, furiten_penalty, -ukeire, protection_penalty, index, tile))
 
     scored.sort(key=lambda item: item[:5])
@@ -1677,6 +1755,116 @@ def sort_discard_candidates_by_badness(state: HandState, candidates: list[Tile],
 
     scored.sort(reverse=True)
     return [tile for _score, _index, tile in scored]
+
+
+def explain_discard_candidates(state: HandState, plans: list[YakuPlan]) -> list[DiscardExplanation]:
+    if not state.discard_candidates:
+        return []
+
+    counts = canonical_counter(state.hand_tiles)
+    visible_counts = canonical_counter(state.all_visible_tiles)
+    discarded_counts = canonical_counter(state.discarded_tiles)
+    dora_keys = dora_base_keys(state)
+    useful_plan_count = Counter(key for plan in plans for key in plan.useful_keys)
+    plan_names_by_key: dict[str, list[str]] = {}
+    for plan in plans:
+        name = yaku_by_key(plan.yaku_key).name
+        for key in plan.useful_keys:
+            plan_names_by_key.setdefault(key, []).append(name)
+
+    explanations: list[DiscardExplanation] = []
+    for rank, tile in enumerate(state.discard_candidates[:4], start=1):
+        reasons: list[str] = []
+        safeguards: list[str] = []
+        pressure = 0
+        key = tile.base_key
+        hand_count = counts[key]
+        visible_count = visible_counts[key]
+        discarded_count = discarded_counts[key]
+        remaining_count = max(0, 4 - visible_count)
+
+        if useful_plan_count[key]:
+            names = ", ".join(list(dict.fromkeys(plan_names_by_key.get(key, [])))[:2])
+            safeguards.append(f"contribui para {useful_plan_count[key]} plano(s): {names}")
+            pressure -= 12 * useful_plan_count[key]
+        elif plans:
+            reasons.append("nao aparece nos yakus/plano principal ativos")
+            pressure += 34
+
+        if tile.red:
+            safeguards.append("aka dora: vale ponto extra")
+            pressure -= 80
+        if key in dora_keys:
+            safeguards.append("dora visivel: vale ponto extra")
+            pressure -= 70
+
+        if tile.is_honor:
+            if hand_count >= 3:
+                safeguards.append("ja forma trinca; normalmente nao deveria ser descarte")
+                pressure -= 85
+            elif hand_count == 2:
+                if remaining_count > 0:
+                    safeguards.append(
+                        f"tem par; ainda pode virar pon/yakuhai se aparecer mais 1 "
+                        f"({remaining_count} copia(s) nao vista(s))"
+                    )
+                    pressure -= 64
+                else:
+                    reasons.append("par de honra sem copias restantes visiveis para evoluir")
+                    pressure += 6
+            elif discarded_count:
+                reasons.append(f"honra isolada; {discarded_count} copia(s) ja foram descartadas")
+                pressure += 28 + discarded_count * 8
+            else:
+                reasons.append("honra isolada; nao encaixa em sequencia")
+                pressure += 22
+        elif tile.is_suited:
+            if not suited_tile_has_connection(tile, counts):
+                reasons.append("isolada: sem vizinho/par forte na mao")
+                pressure += 28
+            if tile.is_terminal:
+                reasons.append("terminal tem menos conexoes de sequencia")
+                pressure += 6
+            if hand_count >= 2:
+                safeguards.append("tem par; pode servir como par da mao")
+                pressure -= 28
+
+        remaining = remove_one_tile_instance(state.hand_tiles, tile)
+        shanten_after = standard_shanten_number(remaining, state.open_melds)
+        improving = improving_tiles_for_completion(state, remaining, shanten_after)
+        ukeire_after = sum(available for _tile, available in improving)
+        if ukeire_after <= 4:
+            reasons.append(f"apos descartar, poucas compras melhoram ({ukeire_after})")
+            pressure += 10
+        else:
+            safeguards.append(f"apos descartar, ainda ha {ukeire_after} compras que melhoram")
+            pressure -= min(18, ukeire_after // 2)
+
+        furiten_penalty = furiten_discard_penalty(state, tile)
+        if furiten_penalty:
+            reasons.append("pode criar espera em furiten")
+            pressure += furiten_penalty
+
+        if not reasons:
+            reasons.append(state.discard_reason or "menor contribuicao estimada para fechar a mao")
+
+        color = "red" if rank == 1 else "yellow"
+        explanations.append(
+            DiscardExplanation(
+                tile=tile,
+                rank=rank,
+                color=color,
+                pressure=max(0, min(100, pressure + 35)),
+                shanten_after=shanten_after,
+                ukeire_after=ukeire_after,
+                visible_count=visible_count,
+                remaining_count=remaining_count,
+                reasons=tuple(list(dict.fromkeys(reasons))[:4]),
+                safeguards=tuple(list(dict.fromkeys(safeguards))[:4]),
+            )
+        )
+
+    return explanations
 
 
 def discard_future_score(state: HandState, discarded_tile: Tile) -> int:
