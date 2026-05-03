@@ -1,6 +1,8 @@
 # MahjongMaster
 
-Ferramenta inicial em PyQt6 para monitorar uma janela aberta do Mahjong Soul.
+Ferramenta inicial em PyQt6 para monitorar uma janela aberta do Mahjong Soul. APENAS USADO PARA TREINAMENTO DE NENHUMA FORMA ESTE PROGRAMA DEVE SER USADO EM PARTIDAS RANQUEADAS.
+
+![Exemplo](Exemplo.png)
 
 ## Rodando
 
