@@ -120,7 +120,12 @@ def simple_dataset_yaml_paths(data_yaml: Path) -> dict[str, Path]:
             continue
         path = Path(value)
         if key == "path":
-            values[key] = path if path.is_absolute() else (data_yaml.parent / path).resolve()
+            if path.is_absolute():
+                values[key] = path
+            elif (ROOT / path).exists():
+                values[key] = (ROOT / path).resolve()
+            else:
+                values[key] = (data_yaml.parent / path).resolve()
         else:
             values[key] = path
     return values

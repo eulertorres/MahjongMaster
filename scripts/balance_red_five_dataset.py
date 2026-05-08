@@ -11,6 +11,7 @@ from typing import Any
 
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+ROOT = Path(__file__).resolve().parents[1]
 GENERATED_MARKER = "_red5dup"
 RED_FIVE_CLASSES = ("man_5_red", "pin_5_red", "sou_5_red")
 REGULAR_FIVE_CLASSES = ("man_5", "pin_5", "sou_5")
@@ -245,7 +246,12 @@ def read_dataset_yaml(data_yaml: Path) -> tuple[Path, dict[int, str]]:
         value = raw_value.strip().strip("'\"")
         if key == "path":
             path = Path(value)
-            dataset_root = path if path.is_absolute() else (data_yaml.parent / path).resolve()
+            if path.is_absolute():
+                dataset_root = path
+            elif (ROOT / path).exists():
+                dataset_root = (ROOT / path).resolve()
+            else:
+                dataset_root = (data_yaml.parent / path).resolve()
             in_names = False
             continue
         if in_names and key.isdigit():
