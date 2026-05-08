@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.pt
+*.zip
 .venv/
 runs/
 colab_packages/

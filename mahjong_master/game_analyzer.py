@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from statistics import median
 
@@ -72,7 +73,7 @@ class GameAnalyzer:
         discarded_tiles = self.discarded_area_tiles(detections)
         discarded_detections_by_player = self.discarded_detections_by_player(discarded_tiles)
         opponent_open_tiles = self.opponent_open_tiles(detections)
-        dora_indicators = self.region_tiles(detections, "dora_indicators")
+        dora_indicators = self.dora_indicator_detections(detections)
         closed_line_y = self.player_closed_line_y()
         if closed_line_y is not None:
             hand_group, call_groups = self.split_hand_and_calls_by_line(player_tiles, closed_line_y)
@@ -158,7 +159,7 @@ class GameAnalyzer:
             kan_options=kan_options_for_hand(hand_tiles, pon_discard, pon_option_source) if kan_button_visible else [],
             dora_indicators=[
                 tile
-                for detection in sorted(dora_indicators, key=lambda item: item.center_x)
+                for detection in dora_indicators
                 if (tile := tile_from_name(detection.name)) is not None
             ],
             player_winds=player_winds or self.player_wind_placeholders(),
@@ -182,13 +183,102 @@ class GameAnalyzer:
         }
         grouped = {}
         for player, key in region_keys.items():
+            raw_detections = self.region_tiles_with_backs(detections, key)
             tiles = [
                 tile
-                for detection in self.sort_opponent_tiles(player, self.region_tiles(detections, key))
+                for detection in self.sort_opponent_tiles(player, raw_detections)
                 if (tile := tile_from_name(detection.name)) is not None
+                and not self.overlaps_tile_back_detection(detection, detections)
             ]
+            tiles.extend(self.inferred_opponent_closed_kan_hidden_tiles(player, raw_detections))
             grouped[player] = tiles
         return grouped
+
+    def inferred_opponent_closed_kan_hidden_tiles(
+        self,
+        player: str,
+        detections: list[TileDetection],
+    ) -> list:
+        inferred = []
+        seen_signatures: set[tuple[int, int]] = set()
+        for group in self.opponent_kan_candidate_groups(player, detections):
+            visible_tiles = [
+                tile
+                for detection in group
+                if detection.name != "tile_back" and (tile := tile_from_name(detection.name)) is not None
+            ]
+            back_count = sum(1 for detection in group if detection.name == "tile_back")
+            if back_count < 2 or len(visible_tiles) != 2:
+                continue
+            counts = Counter(tile.base_key for tile in visible_tiles)
+            if len(counts) != 1 or next(iter(counts.values())) != 2:
+                continue
+            visible_ids = tuple(sorted(id(detection) for detection in group if detection.name != "tile_back"))
+            if visible_ids in seen_signatures:
+                continue
+            seen_signatures.add(visible_ids)
+            inferred_tile = visible_tiles[0]
+            # Mahjong Soul shows a closed kan from opponents as two visible
+            # middle tiles plus two face-down side tiles. The hidden side tiles
+            # are the same value and must count as unavailable.
+            inferred.extend([inferred_tile, inferred_tile])
+        return inferred
+
+    def opponent_kan_candidate_groups(
+        self,
+        player: str,
+        detections: list[TileDetection],
+    ) -> list[list[TileDetection]]:
+        ordered = self.sort_opponent_tiles(player, detections)
+        groups = self.opponent_spatial_groups(player, ordered)
+        if len(ordered) >= 4:
+            groups.extend(ordered[index : index + 4] for index in range(0, len(ordered) - 3))
+        return groups
+
+    def opponent_spatial_groups(
+        self,
+        player: str,
+        detections: list[TileDetection],
+    ) -> list[list[TileDetection]]:
+        if not detections:
+            return []
+        if player == "cima":
+            return self.horizontal_groups(detections)
+
+        ordered = sorted(detections, key=lambda item: item.center_y)
+        heights = [max(1, item.height) for item in ordered]
+        median_height = median(heights)
+        gap_threshold = max(median_height * 1.35, 30)
+        groups: list[list[TileDetection]] = [[ordered[0]]]
+        for detection in ordered[1:]:
+            previous = groups[-1][-1]
+            gap = detection.center_y - previous.center_y
+            if gap > gap_threshold:
+                groups.append([detection])
+            else:
+                groups[-1].append(detection)
+        return groups
+
+    def dora_indicator_detections(self, detections: list[TileDetection]) -> list[TileDetection]:
+        dora = sorted(self.region_tiles(detections, "dora_indicators"), key=lambda item: item.center_x)
+        if not dora:
+            return []
+
+        counts = {}
+        for detection in dora:
+            counts[detection.name] = counts.get(detection.name, 0) + 1
+
+        # The model often reads orange face-down dora backs as white dragons.
+        # A visible dora strip with one real tile plus several identical Haku
+        # detections is almost always that false positive pattern.
+        if counts.get("dragon_white", 0) >= 3:
+            non_white = [item for item in dora if item.name != "dragon_white"]
+            if non_white:
+                dora = non_white
+            else:
+                dora = [next(item for item in dora if item.name == "dragon_white")]
+
+        return dora[:5]
 
     @staticmethod
     def sort_opponent_tiles(player: str, detections: list[TileDetection]) -> list[TileDetection]:
@@ -330,6 +420,28 @@ class GameAnalyzer:
     def is_dora_indicator_detection(self, detection: TileDetection) -> bool:
         return self.contains_detection(self.region_bounds("dora_indicators"), detection)
 
+    @staticmethod
+    def overlap_ratio(a: TileDetection, b: TileDetection) -> float:
+        left = max(a.x1, b.x1)
+        top = max(a.y1, b.y1)
+        right = min(a.x2, b.x2)
+        bottom = min(a.y2, b.y2)
+        if right <= left or bottom <= top:
+            return 0.0
+        overlap_area = (right - left) * (bottom - top)
+        area = max(1.0, a.width * a.height)
+        return overlap_area / area
+
+    def overlaps_tile_back_detection(self, detection: TileDetection, detections: list[TileDetection]) -> bool:
+        if detection.name == "tile_back":
+            return False
+        return any(
+            other.name == "tile_back"
+            and other.confidence >= max(0.5, detection.confidence - 0.08)
+            and self.overlap_ratio(detection, other) >= 0.35
+            for other in detections
+        )
+
     def discarded_area_tiles(self, detections: list[TileDetection]) -> list[TileDetection]:
         configured = self.configured_discard_regions()
         if configured:
@@ -338,6 +450,7 @@ class GameAnalyzer:
                 for detection in detections
                 if any(self.contains_detection(bounds, detection) for bounds in configured.values())
                 and not self.is_dora_indicator_detection(detection)
+                and not self.overlaps_tile_back_detection(detection, detections)
                 and detection.width > 8
                 and detection.height > 12
                 and tile_from_name(detection.name) is not None
@@ -355,6 +468,7 @@ class GameAnalyzer:
             and y_min <= detection.center_y <= y_max
             and detection.center_y < player_y
             and not self.is_dora_indicator_detection(detection)
+            and not self.overlaps_tile_back_detection(detection, detections)
             and detection.width > 8
             and detection.height > 12
             and tile_from_name(detection.name) is not None
@@ -426,7 +540,20 @@ class GameAnalyzer:
         return [
             detection
             for detection in detections
-            if self.contains_detection(bounds, detection) and tile_from_name(detection.name) is not None
+            if self.contains_detection(bounds, detection)
+            and not self.overlaps_tile_back_detection(detection, detections)
+            and tile_from_name(detection.name) is not None
+        ]
+
+    def region_tiles_with_backs(self, detections: list[TileDetection], region_key: str) -> list[TileDetection]:
+        bounds = self.region_bounds(region_key)
+        if bounds is None:
+            return []
+        return [
+            detection
+            for detection in detections
+            if self.contains_detection(bounds, detection)
+            and (detection.name == "tile_back" or tile_from_name(detection.name) is not None)
         ]
 
     def player_wind_placeholders(self) -> dict[str, str]:

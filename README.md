@@ -165,21 +165,51 @@ notebooks/train_colab.ipynb
 ```
 
 O notebook tem dropdowns e botoes para escolher modelo, device, epocas, imagem,
-batch, patience, nome do treino, verificar dataset, instalar dependencias,
-iniciar/parar treino e abrir TensorBoard.
+batch, patience, nome do treino, montar Google Drive, enviar/extrair o dataset,
+verificar dataset, instalar dependencias, iniciar/parar treino e abrir TensorBoard.
 
-Ele nao usa Google Drive. Para pegar automaticamente o dataset deste workspace,
-rode o notebook pelo VSCode/Jupyter local ou use o Google Colab conectado a um
-runtime local. Um runtime remoto do Colab nao consegue ler `C:/Codes/MahjongMaster`
-direto do seu PC.
+Se voce abrir em um runtime remoto do Colab, ele nao consegue ler
+`C:/Codes/MahjongMaster` direto do seu PC. Gere o pacote local:
+
+```powershell
+python scripts/prepare_colab_package.py
+```
+
+Depois, no notebook, use **Upload zip** para enviar
+`mahjongmaster_colab_dataset.zip` e clique **Extrair zip**. O workspace sera
+montado em `/content/MahjongMaster`.
+
+Como alternativa no Colab remoto, clique **Upload pasta** e escolha a pasta
+`dataset` ou a pasta inteira `MahjongMaster`. Esse caminho preserva a estrutura
+da pasta pelo navegador, mas costuma ser mais lento que enviar um `.zip`.
+
+Clique **Montar Drive** para salvar os treinos no Google Drive. O campo **Saida**
+deve apontar para:
+
+```text
+/content/drive/MyDrive/MahjongMaster/runs/detect
+```
+
+Assim, durante o treino, `best.pt`, `last.pt`, `results.csv` e os graficos ficam
+em:
+
+```text
+MyDrive/MahjongMaster/runs/detect/<nome_do_treino>
+```
+
+Se estiver rodando pelo VSCode/Jupyter local ou Colab conectado a runtime local,
+o notebook pode apontar direto para a pasta do projeto.
 
 No notebook:
 
 1. Rode as celulas em ordem.
-2. Confira se **Workspace** aponta para a pasta do projeto.
-3. Clique **Verificar dataset**.
-4. Se necessario, clique **Instalar deps**.
-5. Escolha as configs e clique **Iniciar treino**.
+2. Em Colab remoto, envie o zip e clique **Extrair zip**, ou use **Upload pasta**.
+3. Clique **Montar Drive** e autorize o acesso.
+4. Confira se **Workspace** aponta para `/content/MahjongMaster` ou para a pasta local do projeto.
+5. Confira se **Saida** aponta para `/content/drive/MyDrive/MahjongMaster/runs/detect`.
+6. Clique **Verificar dataset**.
+7. Se necessario, clique **Instalar deps**.
+8. Escolha as configs e clique **Iniciar treino**.
 
 O treino usa:
 
@@ -189,7 +219,13 @@ dataset/images/val
 dataset/images/test
 ```
 
-O resultado fica em:
+No Colab remoto, o resultado fica no Drive:
+
+```text
+MyDrive/MahjongMaster/runs/detect/<nome_do_treino>
+```
+
+Em treino local, o resultado fica em:
 
 ```text
 runs/detect/<nome_do_treino>

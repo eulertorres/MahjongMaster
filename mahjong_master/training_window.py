@@ -302,8 +302,8 @@ class TrainingSummaryWindow(QMainWindow):
             ["Treino", "Epocas", "Epocas/s", "s/epoca", "best mAP50", "best epoch", "last mAP50"]
         )
 
-        self.metrics_table = QTableWidget(0, 5)
-        self.metrics_table.setHorizontalHeaderLabels(["Classe", "P", "Recall", "mAP50", "mAP50-95"])
+        self.metrics_table = QTableWidget(0, 6)
+        self.metrics_table.setHorizontalHeaderLabels(["Split", "Classe", "P", "Recall", "mAP50", "mAP50-95"])
 
         self.plot = TrainingPlot()
         self.comparison_plots: dict[str, TrainingPlot] = {}
@@ -665,9 +665,16 @@ class TrainingSummaryWindow(QMainWindow):
         with csv_path.open("r", encoding="utf-8", newline="") as file:
             rows = list(csv.DictReader(file))
         self.metrics_table.setRowCount(len(rows))
+        seen_classes: set[str] = set()
         for row_index, row in enumerate(rows):
+            class_name = row.get("class", "")
+            split = row.get("split", "")
+            if not split:
+                split = "test" if class_name in seen_classes else "val"
+            seen_classes.add(class_name)
             values = [
-                row.get("class", ""),
+                split,
+                class_name,
                 row.get("precision", ""),
                 row.get("recall", ""),
                 row.get("map50", ""),
@@ -838,11 +845,34 @@ class TrainingWindow(QMainWindow):
         val_labels = self.count_files(PROJECT_ROOT / "dataset" / "labels" / "val", {".txt"})
         test_images = self.count_files(PROJECT_ROOT / "dataset" / "images" / "test", {".png", ".jpg", ".jpeg"})
         test_labels = self.count_files(PROJECT_ROOT / "dataset" / "labels" / "test", {".txt"})
+        missing_test = self.missing_classes_in_split("test")
+        warning = ""
+        if missing_test:
+            preview = ", ".join(missing_test[:6])
+            suffix = "..." if len(missing_test) > 6 else ""
+            warning = f" | ATENCAO test sem: {preview}{suffix}"
         return (
             f"Dataset: train {train_images} imgs/{train_labels} labels | "
             f"val {val_images} imgs/{val_labels} labels | "
             f"test {test_images} imgs/{test_labels} labels"
+            f"{warning}"
         )
+
+    def missing_classes_in_split(self, split: str) -> list[str]:
+        labels_dir = PROJECT_ROOT / "dataset" / "labels" / split
+        seen: set[int] = set()
+        for label_path in labels_dir.glob("*.txt"):
+            for raw_line in label_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                parts = raw_line.split()
+                if not parts:
+                    continue
+                try:
+                    class_id = int(float(parts[0]))
+                except ValueError:
+                    continue
+                if 0 <= class_id < len(TILE_CLASSES):
+                    seen.add(class_id)
+        return [class_name for class_id, class_name in enumerate(TILE_CLASSES) if class_id not in seen]
 
     def create_colab_dataset_zip(self) -> None:
         selected_path, _filter = QFileDialog.getSaveFileName(
@@ -1032,13 +1062,17 @@ class TrainingWindow(QMainWindow):
             return
 
         rows = []
+        current_split = "val"
         for raw_line in self.log_output.toPlainText().splitlines():
             line = ANSI_RE.sub("", raw_line).strip()
+            if "[TEST]" in line:
+                current_split = "test"
             parts = line.split()
             if len(parts) < 6 or parts[0] not in TILE_CLASSES:
                 continue
             rows.append(
                 {
+                    "split": current_split,
                     "class": parts[0],
                     "images": parts[1],
                     "instances": parts[2],
@@ -1056,7 +1090,7 @@ class TrainingWindow(QMainWindow):
         with output_path.open("w", encoding="utf-8", newline="") as file:
             writer = csv.DictWriter(
                 file,
-                fieldnames=["class", "images", "instances", "precision", "recall", "map50", "map50_95"],
+                fieldnames=["split", "class", "images", "instances", "precision", "recall", "map50", "map50_95"],
             )
             writer.writeheader()
             writer.writerows(rows)

@@ -12,11 +12,13 @@ O fluxo atual e:
 2. O modelo YOLO detecta pecas visiveis.
 3. `game_analyzer.py` converte as caixas detectadas em uma estimativa da mao do jogador.
 4. `mahjong_logic.py` converte nomes de classes em pecas, grupos e yakus provaveis.
-5. A UI mostra um resumo abaixo da preview. Esse painel ocupa uma parte grande da janela para caber a analise.
+5. A UI mostra um resumo no terminal/preview e, se `Auto` estiver ligado, decide chamadas e descartes.
 
 As regioes de tela usadas pela leitura ficam em `configs.json`, em coordenadas da captura normalizada `1592x933`. A janela principal tem o botao `Areas`, que abre um editor visual: arraste a area para mover e puxe o canto inferior direito para redimensionar. Os campos numericos continuam disponiveis para ajuste fino. O checkbox `Areas` liga/desliga o overlay desenhado na preview.
 
 As regioes `Oponente esquerda/frente/direita` representam mao aberta/chamadas laterais dos oponentes. Os descartes ficam em regioes separadas: `Descartes jogador`, `Descartes esquerda`, `Descartes frente` e `Descartes direita`. Somente essas regioes de descarte alimentam a lista de pecas ja vistas para reduzir probabilidades de yakus dependentes de pecas que sairam.
+
+Nas regioes de mao/chamadas dos oponentes, um kan fechado exibido como `tile_back + peca + peca + tile_back` e contabilizado como quatro copias daquela peca. As duas pecas viradas sao inferidas como iguais as duas expostas, entao deixam de aparecer como disponiveis para completar yakus/esperas.
 
 Exemplo de saida:
 
@@ -53,7 +55,90 @@ Cima: green-dragon
 Direita: red-dragon | 1-pin
 ```
 
-Os logs tecnicos antigos continuam existindo, mas so aparecem quando o checkbox `DEBUG` esta ligado.
+Os logs tecnicos antigos continuam existindo, mas so aparecem quando o checkbox `DEBUG` esta ligado. No menu `Opcoes`, o botao `Deletar logs` apaga os logs de autoplay em `logs/autoplay`.
+
+## Versionamento da logica
+
+Cada JSONL de autoplay grava `logic_version`. Quando uma regra de chamada,
+descarte, defesa ou priorizacao de estrategia mudar, incremente
+`BOT_LOGIC_VERSION` em `mahjong_master/mahjong_logic.py`. O evento
+`session_start` tambem grava `logic_notes`, para comparar partidas de versoes
+diferentes e medir se a estrategia melhorou.
+
+## Maquina de estados do bot
+
+O MahjongMaster roda como uma maquina de estados simples em cima dos frames capturados. O estado nao e salvo como uma enum unica no codigo, mas o comportamento efetivo e este:
+
+```text
+MONITORANDO
+  |
+  | Predict le mesa, botoes, turno e pixels
+  v
+ANALISANDO_MAO
+  |
+  | Se houver botao Chii/Pon/Kan/Riichi
+  v
+DECIDINDO_CHAMADA
+  |
+  | SIM: agenda clique no botao
+  | NAO: agenda Skip quando aplicavel
+  v
+AGUARDANDO_ESTABILIZAR
+  |
+  | Se for minha vez por 3 frames
+  v
+DECIDINDO_DESCARTE
+  |
+  | Move mouse para a pior peca atual
+  v
+REVALIDANDO_DESCARTE
+  |
+  | Se a peca ainda e a pior, clica
+  | Se mudou, volta a DECIDINDO_DESCARTE
+  v
+MONITORANDO
+```
+
+Se `Ron` ou `Tsumo` for detectado pelos pixels configurados, o AutoPlay interrompe qualquer decisao pendente e agenda esse clique antes de qualquer chamada, descarte, defesa ou rotina de estabilizacao.
+
+Estados auxiliares:
+
+- `ROTINA_FINAL`: so executa quando `Auto` e `Rot` estao ligados. Cada etapa espera seu pixel de trigger e clica no pixel configurado. Se a etapa atual ainda nao apareceu, ela fica aguardando; nao volta para o inicio. O preview desenha os probes de rotina com `SIM`/`NAO`, incluindo o `Confirm`.
+- `CAPTURA_DATASET`: so executa quando `Capt` esta ligado e ha predict com deteccoes. Nao usa mais intervalo fixo de tempo.
+- `DEFESA_PONDERADA`: nao e um modo binario permanente. A escolha de descarte sempre pondera beneficio do plano, han esperado e risco; quando adversarios entram em Riichi, o peso de risco cresce bastante.
+
+## Captura automatica de dataset
+
+O modo `Capt` agora usa dois thresholds configuraveis em `Opcoes`:
+
+- `Capt 1a foto`: padrao `35` deteccoes.
+- `Capt 2a foto`: padrao `75` deteccoes.
+
+A maquina de estados da captura e:
+
+```text
+AGUARDANDO_1A_FOTO
+  |
+  | deteccoes >= Capt 1a foto
+  v
+SALVA_1A_FOTO
+  |
+  v
+AGUARDANDO_2A_FOTO
+  |
+  | deteccoes >= Capt 2a foto
+  v
+SALVA_2A_FOTO
+  |
+  v
+AGUARDANDO_RESET
+  |
+  | deteccoes < Capt 1a foto
+  v
+AGUARDANDO_1A_FOTO
+```
+
+Na pratica, cada partida gera uma foto quando a mesa ja tem leitura suficiente. Se a partida se prolongar e passar do segundo limiar, gera uma segunda foto. Depois disso o capturador so rearma quando a contagem cai abaixo do primeiro limiar, o que normalmente acontece ao trocar de partida/tela.
 
 ## Modulos
 
@@ -74,9 +159,17 @@ Tambem contem funcoes auxiliares:
 - `classify_meld(tiles)`: tenta classificar um grupo como `CHI`, `PON` ou `KAN`.
 - `likely_yaku(state)`: roda os matchers disponiveis sobre o estado da mao.
 
-Quando nenhum yaku esta confirmado, a camada gera uma estimativa de compatibilidade em porcentagem para planos simples, como `All Simples`, `Half Outside Hand`, `Half Flush`, `Full Flush`, `Pure Straight`, `Seven Pairs` e yakuhai de dragoes. Essa porcentagem e um score heuristico, nao uma probabilidade matematica real.
+Quando nenhum yaku esta confirmado, a camada gera uma estimativa de compatibilidade em porcentagem para planos simples, como `All Simples`, `Half Outside Hand`, `Half Flush`, `Full Flush`, `Pure Straight`, `Seven Pairs`, `Riichi` e yakuhai de dragoes. Essa porcentagem e um score heuristico, nao uma probabilidade matematica real. Planos especulativos agora tambem sao limitados pelo shanten/formacao real da mao, para evitar mostrar um yaku como 100% apenas porque as pecas combinam com ele enquanto a mao ainda esta longe de fechar.
+
+`Riichi` entra como plano valido quando a mao esta fechada. Ele fica mais atrativo quando a mao esta em tenpai ou perto disso e quando ha aka dora/doras, porque esses bonus so precisam de um yaku para pontuar.
+
+Quando nenhum plano unico e claramente superior, a estrategia passa a criar um objetivo de `Mao flexivel`: ela combina progresso real de shanten/ukeire, multiplos yakus possiveis, Riichi, doras e valor baixo aceitavel. Nesse modo, yakus como `Half Outside Hand`, `Fully Outside Hand`, `Half Flush` e `Full Flush` deixam de dominar so por terem muitas pecas compativeis; se a formacao real estiver longe, eles entram apenas como suporte fraco para nao prender a mao em um plano dificil.
+
+A eficiencia da mao tambem calcula qualidade de blocos com `hand_shape_profile`: grupos completos, pares, ryanmen, ryankan, kanchan, penchan, pares demais e pecas isoladas. Essa nota entra na escolha de descarte, nas penalidades de planos especulativos e no log de autoplay. Assim, uma mao com bons ryanmen tende a ser preservada, enquanto penchan/kanchan isolados e honras soltas saem antes mesmo quando um yaku amplo parece tentador.
 
 Quando um descarte deixaria a mao em tenpai, a logica tambem calcula as esperas resultantes. Se alguma espera ja aparece nos descartes do proprio jogador, o descarte recebe penalidade de furiten e tende a ser evitado, salvo quando ele ainda for claramente o melhor avanco de shanten.
+
+O OCR de pontuacao continua rodando em segundo plano, mas a area e o valor so aparecem na preview/terminal quando o checkbox `Areas` esta ligado. Para reduzir custo, ele nao roda a cada frame: a leitura e tentada no maximo tres vezes por mao, apenas quando a mao esta incompleta (`???`), com intervalo minimo entre tentativas.
 
 ### `game_analyzer.py`
 
@@ -159,6 +252,7 @@ A primeira heuristica e conservadora e focada apenas no jogador local.
    - Uma chamada aberta com terminal ou honra bloqueia `All Simples`.
    - Uma chamada aberta `456` bloqueia `Half Outside Hand`, `Fully Outside Hand`, `All Triplets`, `All Terminals and Honors` e outros yakus incompativeis.
    - Chamadas abertas misturando naipes bloqueiam `Half Flush` e `Full Flush`.
+   - Quando uma mao ja abriu uma sequencia/trinca de um naipe, planos de flush so podem mirar esse mesmo naipe. Ex.: abrir `2-pin 3-pin 4-pin` impede tentar `Full Flush` de man, mesmo que ainda existam muitas pecas man na mao fechada.
    - Chamadas abertas com pecas nao-verdes bloqueiam `All Green`.
 
    Pecas soltas na mao fechada nao bloqueiam automaticamente um yaku, porque ainda podem ser descartadas. O bloqueio forte e aplicado principalmente ao que ja ficou permanente: chamadas abertas.
@@ -177,7 +271,7 @@ A primeira heuristica e conservadora e focada apenas no jogador local.
 
 12. Detecta turno, leste e botoes por pixel configuravel.
 
-   Chii, Pon, Kan, Riichi, Ron, Tsumo, Skip, setas de turno e marcador de leste nao sao mais areas retangulares. No editor `Areas`, a secao `Pixel` permite escolher um seletor, clicar na imagem congelada e salvar a posicao, a cor exata e uma tolerancia. Em runtime, se aquele pixel estiver com cor parecida, a variavel correspondente fica ativa.
+   Chii, Pon, Kan, Riichi, Skip, setas de turno e marcador de leste nao sao mais areas retangulares. No editor `Areas`, a secao `Pixel` permite escolher um seletor, clicar na imagem congelada e salvar a posicao, a cor exata e uma tolerancia. Em runtime, se aquele pixel estiver com cor parecida, a variavel correspondente fica ativa. A deteccao propria de Ron/Tsumo por botao foi removida; o placar passa a ser lido por OCR nas quatro areas de pontuacao.
 
    Para botoes existem dois seletores por acao, porque o Mahjong Soul pode deslocar os botoes quando aparecem varias opcoes. O ponto ativo tambem e usado como destino de clique quando a decisao for `SIM`. Quando o botao aparece, o preview marca o ponto e o resumo mostra:
 

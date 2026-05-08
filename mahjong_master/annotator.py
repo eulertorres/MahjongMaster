@@ -275,16 +275,21 @@ class AnnotatorWindow(QMainWindow):
         self.setWindowTitle("MahjongMaster - Anotador YOLO")
         self.resize(1320, 820)
 
-        self.images = self._raw_images()
+        self.all_images = self._raw_images()
+        self.images = list(self.all_images)
         self.current_index = 0
         self.current_image_path: Path | None = None
+        self.active_class_filter: int | None = None
+        self.search_result_counts: dict[str, int] = {}
         self.current_pixmap = QPixmap()
         self.annotations: list[Annotation] = []
         self.helper_boxes: list[HelperBox] = []
         self.annotation_items: list[QGraphicsRectItem] = []
         self.annotation_labels: list[QGraphicsTextItem] = []
+        self.annotation_label_backgrounds: list[QGraphicsRectItem] = []
         self.helper_items: list[QGraphicsRectItem] = []
         self.helper_labels: list[QGraphicsTextItem] = []
+        self.helper_label_backgrounds: list[QGraphicsRectItem] = []
         self.selected_annotation_index: int | None = None
         self.annotation_model = None
         self.annotation_model_path: Path | None = None
@@ -302,7 +307,22 @@ class AnnotatorWindow(QMainWindow):
 
         self.train_summary_list = QListWidget()
         self.train_summary_list.setMinimumHeight(180)
+        self.train_summary_list.itemDoubleClicked.connect(self.search_from_summary_item)
         self.refresh_train_summary()
+
+        self.search_class_combo = QComboBox()
+        self.search_class_combo.addItems(TILE_CLASSES)
+        red_sou_index = self.search_class_combo.findText("sou_5_red")
+        if red_sou_index >= 0:
+            self.search_class_combo.setCurrentIndex(red_sou_index)
+        self.search_button = QPushButton("Buscar")
+        self.search_button.setToolTip("Filtrar imagens anotadas que contem a classe selecionada")
+        self.search_button.clicked.connect(self.search_images_by_selected_class)
+        self.clear_search_button = QPushButton("Todas")
+        self.clear_search_button.setToolTip("Remover filtro de classe")
+        self.clear_search_button.clicked.connect(self.clear_image_search)
+        self.search_status_label = QLabel("Sem filtro")
+        self.search_status_label.setStyleSheet("QLabel { color: #94A3B8; }")
 
         self.view = AnnotationView()
         self.view.click_handler = self.handle_image_click
@@ -404,6 +424,13 @@ class AnnotatorWindow(QMainWindow):
 
         left = QVBoxLayout()
         left.addWidget(QLabel("Screenshots"))
+        search_row = QHBoxLayout()
+        search_row.setSpacing(4)
+        search_row.addWidget(self.search_class_combo, stretch=1)
+        search_row.addWidget(self.search_button)
+        search_row.addWidget(self.clear_search_button)
+        left.addLayout(search_row)
+        left.addWidget(self.search_status_label)
         left.addWidget(self.image_list, stretch=3)
         left.addWidget(QLabel("Pecas catalogadas"))
         left.addWidget(self.train_summary_list, stretch=2)
@@ -512,6 +539,115 @@ class AnnotatorWindow(QMainWindow):
             if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
         )
 
+    def search_images_by_selected_class(self) -> None:
+        class_id = self.search_class_combo.currentIndex()
+        if not 0 <= class_id < len(TILE_CLASSES):
+            return
+        self.search_images_by_class(class_id)
+
+    def search_from_summary_item(self, item: QListWidgetItem) -> None:
+        text = item.text()
+        class_name = text.split(":", 1)[0].strip()
+        if class_name not in TILE_CLASSES:
+            return
+        class_id = TILE_CLASSES.index(class_name)
+        self.search_class_combo.setCurrentIndex(class_id)
+        self.search_images_by_class(class_id)
+
+    def search_images_by_class(self, class_id: int) -> None:
+        results = self.dataset_images_containing_class(class_id)
+        self.active_class_filter = class_id
+        self.apply_image_search_results(results)
+        self.current_index = 0
+        self.current_image_path = None
+        self.populate_image_list(0 if self.images else None)
+        total_boxes = sum(count for _path, count in results)
+        class_name = TILE_CLASSES[class_id]
+        self.search_status_label.setText(f"{class_name}: {len(results)} imagem(ns), {total_boxes} box(es)")
+        self.statusBar().showMessage(
+            f"Filtro aplicado: {class_name} aparece em {len(results)} imagem(ns), {total_boxes} box(es)."
+        )
+        if not self.images:
+            self.current_pixmap = QPixmap()
+            self.annotations = []
+            self.helper_boxes = []
+            self.view.scene().clear()
+
+    def refresh_active_image_search(self, preferred_path: Path | None = None) -> None:
+        if self.active_class_filter is None:
+            return
+        results = self.dataset_images_containing_class(self.active_class_filter)
+        self.apply_image_search_results(results)
+        total_boxes = sum(count for _path, count in results)
+        class_name = TILE_CLASSES[self.active_class_filter]
+        self.search_status_label.setText(f"{class_name}: {len(results)} imagem(ns), {total_boxes} box(es)")
+        selected_index = None
+        if preferred_path in self.images:
+            selected_index = self.images.index(preferred_path)
+        elif self.images:
+            selected_index = min(self.current_index, len(self.images) - 1)
+        self.populate_image_list(selected_index)
+
+    def apply_image_search_results(self, results: list[tuple[Path, int]]) -> None:
+        self.search_result_counts = {path.stem: count for path, count in results}
+        self.images = [path for path, _count in results]
+
+    def clear_image_search(self) -> None:
+        selected_path = self.current_image_path
+        self.active_class_filter = None
+        self.search_result_counts = {}
+        self.all_images = self._raw_images()
+        self.images = list(self.all_images)
+        selected_index = None
+        if selected_path in self.images:
+            selected_index = self.images.index(selected_path)
+        elif self.images:
+            selected_index = 0
+        self.search_status_label.setText("Sem filtro")
+        self.populate_image_list(selected_index)
+        self.statusBar().showMessage(f"Filtro removido. {len(self.images)} imagem(ns) no dataset raw.")
+
+    def dataset_images_containing_class(self, class_id: int) -> list[tuple[Path, int]]:
+        raw_by_stem = {path.stem: path for path in self.all_images}
+        counts_by_stem: dict[str, int] = {}
+        for split in DATASET_SPLITS:
+            labels_dir = DATASET_DIR / "labels" / split
+            if not labels_dir.exists():
+                continue
+            for label_path in sorted(labels_dir.glob("*.txt")):
+                count = self.count_class_in_label_file(label_path, class_id)
+                if count <= 0:
+                    continue
+                counts_by_stem[label_path.stem] = counts_by_stem.get(label_path.stem, 0) + count
+
+        return sorted(
+            (
+                (raw_by_stem[stem], count)
+                for stem, count in counts_by_stem.items()
+                if stem in raw_by_stem
+            ),
+            key=lambda item: item[0].name,
+        )
+
+    @staticmethod
+    def count_class_in_label_file(label_path: Path, class_id: int) -> int:
+        count = 0
+        try:
+            lines = label_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return 0
+        for line in lines:
+            parts = line.split()
+            if not parts:
+                continue
+            try:
+                found_class_id = int(parts[0])
+            except ValueError:
+                continue
+            if found_class_id == class_id:
+                count += 1
+        return count
+
     def populate_image_list(self, selected_index: int | None = None) -> None:
         self.image_list.blockSignals(True)
         self.image_list.clear()
@@ -540,6 +676,9 @@ class AnnotatorWindow(QMainWindow):
             None: "#E5E7EB",
         }[split]
         suffix = f" [{split}]" if split else ""
+        match_count = self.search_result_counts.get(image_path.stem, 0)
+        if self.active_class_filter is not None and match_count:
+            suffix += f" x{match_count}"
 
         row = QWidget()
         row_layout = QHBoxLayout()
@@ -569,7 +708,10 @@ class AnnotatorWindow(QMainWindow):
 
         label = QLabel(f"{image_path.name}{suffix}")
         label.setStyleSheet(f"color: {color}; background: transparent;")
-        label.setToolTip("Ainda nao salva" if split is None else f"Salva para {split}")
+        tooltip = "Ainda nao salva" if split is None else f"Salva para {split}"
+        if self.active_class_filter is not None and match_count:
+            tooltip += f" | {match_count}x {TILE_CLASSES[self.active_class_filter]}"
+        label.setToolTip(tooltip)
         label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         row_layout.addWidget(delete_button)
@@ -761,6 +903,7 @@ class AnnotatorWindow(QMainWindow):
                 continue
 
             shortcut = QShortcut(sequence, self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(callback)
             self.shortcuts.append(shortcut)
 
@@ -997,9 +1140,11 @@ class AnnotatorWindow(QMainWindow):
         self.current_pixmap = QPixmap(str(self.current_image_path))
         self.annotation_items = []
         self.annotation_labels = []
+        self.annotation_label_backgrounds = []
         self.helper_boxes = []
         self.helper_items = []
         self.helper_labels = []
+        self.helper_label_backgrounds = []
         self.selected_annotation_index = None
         self.pending_selected_suit = None
         self.view.load_pixmap(self.current_pixmap)
@@ -1223,7 +1368,14 @@ class AnnotatorWindow(QMainWindow):
         self.statusBar().showMessage(f"Box selecionado alterado para {TILE_CLASSES[class_id]}.")
 
     def redraw_annotations(self) -> None:
-        for item in self.annotation_items + self.annotation_labels + self.helper_items + self.helper_labels:
+        for item in (
+            self.annotation_items
+            + self.annotation_labels
+            + self.annotation_label_backgrounds
+            + self.helper_items
+            + self.helper_labels
+            + self.helper_label_backgrounds
+        ):
             try:
                 if item.scene() is self.view.scene():
                     self.view.scene().removeItem(item)
@@ -1232,8 +1384,10 @@ class AnnotatorWindow(QMainWindow):
 
         self.annotation_items = []
         self.annotation_labels = []
+        self.annotation_label_backgrounds = []
         self.helper_items = []
         self.helper_labels = []
+        self.helper_label_backgrounds = []
         for index, annotation in enumerate(self.annotations):
             is_selected = index == self.selected_annotation_index
             is_empty = annotation.class_id is None
@@ -1256,9 +1410,12 @@ class AnnotatorWindow(QMainWindow):
             text.setData(0, index)
             text.setZValue(21)
             self.view.scene().addItem(text)
+            background = self.label_background_for_text(text, QColor(15, 23, 42, 218), 20.5)
+            self.view.scene().addItem(background)
 
             self.annotation_items.append(rect_item)
             self.annotation_labels.append(text)
+            self.annotation_label_backgrounds.append(background)
 
         for index, helper in enumerate(self.helper_boxes):
             rect_item = self.view.scene().addRect(
@@ -1276,12 +1433,27 @@ class AnnotatorWindow(QMainWindow):
             text.setData(1, index)
             text.setZValue(11)
             self.view.scene().addItem(text)
+            background = self.label_background_for_text(text, QColor(8, 47, 73, 218), 10.5)
+            self.view.scene().addItem(background)
 
             self.helper_items.append(rect_item)
             self.helper_labels.append(text)
+            self.helper_label_backgrounds.append(background)
 
         helper_part = f" | {len(self.helper_boxes)} sugestoes" if self.helper_boxes else ""
         self.statusBar().showMessage(f"{len(self.annotations)} anotacoes nesta imagem{helper_part}.")
+
+    @staticmethod
+    def label_background_for_text(text: QGraphicsTextItem, color: QColor, z_value: float) -> QGraphicsRectItem:
+        rect = text.boundingRect().adjusted(-4, -2, 4, 2)
+        rect.translate(text.pos())
+        item = QGraphicsRectItem(rect)
+        pen = QPen()
+        pen.setStyle(Qt.PenStyle.NoPen)
+        item.setPen(pen)
+        item.setBrush(QBrush(color))
+        item.setZValue(z_value)
+        return item
 
     def update_annotation_rect(self, index: int, rect: QRectF) -> None:
         if not 0 <= index < len(self.annotations):
@@ -1334,6 +1506,8 @@ class AnnotatorWindow(QMainWindow):
         shutil.copy2(self.current_image_path, image_path)
         label_path.write_text(self.yolo_label_text(), encoding="utf-8")
         self.remove_from_other_split(split)
+        if self.active_class_filter is not None:
+            self.refresh_active_image_search(self.current_image_path)
         self.refresh_image_statuses()
         self.refresh_train_summary()
         self.statusBar().showMessage(f"Salvo em {split}: {image_path.name}")
@@ -1351,17 +1525,25 @@ class AnnotatorWindow(QMainWindow):
             other_label.unlink(missing_ok=True)
 
     def delete_image(self, image_path: Path) -> None:
-        if image_path not in self.images:
+        if image_path not in self.all_images:
             return
 
         deleted_current = image_path == self.current_image_path
-        old_index = self.images.index(image_path)
+        old_index = self.images.index(image_path) if image_path in self.images else 0
         image_path.unlink(missing_ok=True)
         for split in DATASET_SPLITS:
             (DATASET_DIR / "images" / split / image_path.name).unlink(missing_ok=True)
             (DATASET_DIR / "labels" / split / f"{image_path.stem}.txt").unlink(missing_ok=True)
 
-        self.images = self._raw_images()
+        self.all_images = self._raw_images()
+        if self.active_class_filter is not None:
+            results = self.dataset_images_containing_class(self.active_class_filter)
+            self.apply_image_search_results(results)
+            total_boxes = sum(count for _path, count in results)
+            class_name = TILE_CLASSES[self.active_class_filter]
+            self.search_status_label.setText(f"{class_name}: {len(results)} imagem(ns), {total_boxes} box(es)")
+        else:
+            self.images = list(self.all_images)
         self.refresh_train_summary()
         if not self.images:
             self.current_index = 0

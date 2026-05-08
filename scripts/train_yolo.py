@@ -5,6 +5,8 @@ from pathlib import Path
 
 from ultralytics import RTDETR, YOLO
 
+from balance_red_five_dataset import balance_red_fives, format_report
+
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
@@ -24,11 +26,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exist-ok", action="store_true")
     parser.add_argument("--skip-test", action="store_true", help="Nao roda avaliacao final no split test.")
     parser.add_argument("--test-split", default="test", help="Split usado para avaliacao final apos o treino.")
+    parser.add_argument("--no-balance-red-fives", action="store_true", help="Desativa oversampling controlado dos 5 vermelhos.")
+    parser.add_argument("--red-five-target-ratio", type=float, default=0.75)
+    parser.add_argument("--red-five-max-multiplier", type=float, default=3.0)
+    parser.add_argument("--red-five-max-copies-per-image", type=int, default=3)
+    parser.add_argument("--red-five-max-new-image-ratio", type=float, default=0.25)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if not args.no_balance_red_fives:
+        report = balance_red_fives(
+            Path(args.data),
+            split="train",
+            target_ratio=args.red_five_target_ratio,
+            max_multiplier=args.red_five_max_multiplier,
+            max_copies_per_image=args.red_five_max_copies_per_image,
+            max_new_image_ratio=args.red_five_max_new_image_ratio,
+        )
+        print(format_report(report), flush=True)
     model_class = RTDETR if "rtdetr" in args.model.lower() else YOLO
     model = model_class(args.model)
     model.train(

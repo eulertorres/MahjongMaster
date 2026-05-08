@@ -1,23 +1,25 @@
 {
   "version": 1,
-  "show_regions_overlay": false,
+  "show_regions_overlay": true,
   "predict_fps": 30.0,
-  "predict_conf": 0.65,
+  "predict_conf": 0.8500000000000001,
   "debug_enabled": false,
-  "capture_mode_enabled": false,
-  "routines_enabled": false,
-  "auto_mouse_delay_min": 0.30000000000000004,
-  "auto_mouse_delay_max": 0.4,
-  "auto_click_delay_min": 0.3,
-  "auto_click_delay_max": 0.30000000000000004,
-  "auto_call_settle_seconds": 1.2000000000000002,
+  "capture_mode_enabled": true,
+  "capture_first_detection_threshold": 35,
+  "capture_second_detection_threshold": 75,
+  "routines_enabled": true,
+  "auto_mouse_delay_min": 0.7999999999999999,
+  "auto_mouse_delay_max": 0.7999999999999999,
+  "auto_click_delay_min": 0.30000000000000004,
+  "auto_click_delay_max": 0.40000000000000013,
+  "auto_call_settle_seconds": 0.5999999999999998,
   "pixel_probes": {
     "turn_left": {
       "label": "Vez esquerda",
-      "x": 701,
-      "y": 385,
-      "color": "#fff676",
-      "tolerance": 25,
+      "x": 693,
+      "y": 387,
+      "color": "#e2ab75",
+      "tolerance": 35,
       "enabled": true,
       "mode": "match"
     },
@@ -41,10 +43,10 @@
     },
     "turn_player": {
       "label": "Vez jogador",
-      "x": 803,
-      "y": 459,
-      "color": "#fff676",
-      "tolerance": 45,
+      "x": 790,
+      "y": 455,
+      "color": "#fff878",
+      "tolerance": 95,
       "enabled": true,
       "mode": "match"
     },
@@ -86,10 +88,10 @@
     },
     "button_chii_1": {
       "label": "Chii 1",
-      "x": 804,
-      "y": 730,
-      "color": "#cde4cb",
-      "tolerance": 45,
+      "x": 914,
+      "y": 747,
+      "color": "#205538",
+      "tolerance": 10,
       "enabled": true,
       "mode": "match"
     },
@@ -98,34 +100,34 @@
       "x": 588,
       "y": 741,
       "color": "#327963",
-      "tolerance": 45,
+      "tolerance": 10,
       "enabled": true,
       "mode": "match"
     },
     "button_pon_1": {
       "label": "Pon 1",
-      "x": 854,
-      "y": 727,
-      "color": "#bfeade",
-      "tolerance": 25,
+      "x": 823,
+      "y": 730,
+      "color": "#0184b0",
+      "tolerance": 20,
       "enabled": true,
       "mode": "match"
     },
     "button_pon_2": {
       "label": "Pon 2",
-      "x": 770,
-      "y": 700,
-      "color": "#06B6D4",
-      "tolerance": 45,
+      "x": 587,
+      "y": 725,
+      "color": "#016d96",
+      "tolerance": 15,
       "enabled": true,
       "mode": "match"
     },
     "button_kan_1": {
       "label": "Kan 1",
-      "x": 610,
-      "y": 700,
-      "color": "#F97316",
-      "tolerance": 45,
+      "x": 852,
+      "y": 747,
+      "color": "#803775",
+      "tolerance": 10,
       "enabled": true,
       "mode": "match"
     },
@@ -134,7 +136,7 @@
       "x": 770,
       "y": 700,
       "color": "#F97316",
-      "tolerance": 45,
+      "tolerance": 10,
       "enabled": true,
       "mode": "match"
     },
@@ -143,7 +145,7 @@
       "x": 862,
       "y": 735,
       "color": "#9f4c15",
-      "tolerance": 35,
+      "tolerance": 10,
       "enabled": true,
       "mode": "match"
     },
@@ -152,16 +154,16 @@
       "x": 770,
       "y": 700,
       "color": "#F97316",
-      "tolerance": 45,
+      "tolerance": 10,
       "enabled": true,
       "mode": "match"
     },
     "button_ron_1": {
       "label": "Ron 1",
-      "x": 610,
-      "y": 700,
-      "color": "#E11D48",
-      "tolerance": 45,
+      "x": 828,
+      "y": 741,
+      "color": "#952727",
+      "tolerance": 15,
       "enabled": true,
       "mode": "match"
     },
@@ -169,17 +171,17 @@
       "label": "Ron 2",
       "x": 770,
       "y": 700,
-      "color": "#E11D48",
+      "color": "#EF4444",
       "tolerance": 45,
-      "enabled": true,
+      "enabled": false,
       "mode": "match"
     },
     "button_tsumo_1": {
       "label": "Tsumo 1",
-      "x": 835,
-      "y": 738,
-      "color": "#93264a",
-      "tolerance": 45,
+      "x": 610,
+      "y": 700,
+      "color": "#EF4444",
+      "tolerance": 15,
       "enabled": true,
       "mode": "match"
     },
@@ -187,9 +189,63 @@
       "label": "Tsumo 2",
       "x": 770,
       "y": 700,
+      "color": "#EF4444",
+      "tolerance": 45,
+      "enabled": false,
+      "mode": "match"
+    },
+    "opponent_ron_left": {
+      "label": "RON adversario esq",
+      "x": 350,
+      "y": 360,
       "color": "#E11D48",
       "tolerance": 45,
-      "enabled": true,
+      "enabled": false,
+      "mode": "match"
+    },
+    "opponent_ron_top": {
+      "label": "RON adversario frente",
+      "x": 796,
+      "y": 190,
+      "color": "#E11D48",
+      "tolerance": 45,
+      "enabled": false,
+      "mode": "match"
+    },
+    "opponent_ron_right": {
+      "label": "RON adversario dir",
+      "x": 1240,
+      "y": 360,
+      "color": "#E11D48",
+      "tolerance": 45,
+      "enabled": false,
+      "mode": "match"
+    },
+    "opponent_tsumo_left": {
+      "label": "TSUMO adversario esq",
+      "x": 350,
+      "y": 360,
+      "color": "#E11D48",
+      "tolerance": 45,
+      "enabled": false,
+      "mode": "match"
+    },
+    "opponent_tsumo_top": {
+      "label": "TSUMO adversario frente",
+      "x": 796,
+      "y": 190,
+      "color": "#E11D48",
+      "tolerance": 45,
+      "enabled": false,
+      "mode": "match"
+    },
+    "opponent_tsumo_right": {
+      "label": "TSUMO adversario dir",
+      "x": 1240,
+      "y": 360,
+      "color": "#E11D48",
+      "tolerance": 45,
+      "enabled": false,
       "mode": "match"
     },
     "button_skip_1": {
@@ -216,33 +272,6 @@
       "y": 604,
       "color": "#6b2b3b",
       "tolerance": 55,
-      "enabled": true,
-      "mode": "match"
-    },
-    "routine_match_end_yellow": {
-      "label": "Rotina fim amarelo",
-      "x": 1407,
-      "y": 877,
-      "color": "#f0cb68",
-      "tolerance": 70,
-      "enabled": true,
-      "mode": "match"
-    },
-    "routine_one_more_match": {
-      "label": "Rotina One More",
-      "x": 685,
-      "y": 25,
-      "color": "#ffffff",
-      "tolerance": 70,
-      "enabled": true,
-      "mode": "match"
-    },
-    "routine_confirm": {
-      "label": "Rotina Confirm",
-      "x": 575,
-      "y": 679,
-      "color": "#fbe37a",
-      "tolerance": 70,
       "enabled": true,
       "mode": "match"
     },
@@ -287,9 +316,125 @@
       "x": 910,
       "y": 395,
       "color": "#4e4c58",
-      "tolerance": 35,
+      "tolerance": 10,
       "enabled": true,
       "mode": "not_match"
+    }
+  },
+  "routine_probes": {
+    "end_confirm_yellow": {
+      "label": "Confirm amarelo",
+      "x": 1374,
+      "y": 843,
+      "color": "#fae179",
+      "tolerance": 50,
+      "enabled": true
+    },
+    "one_more_match": {
+      "label": "One More Match",
+      "x": 1100,
+      "y": 746,
+      "color": "#2F61B4",
+      "tolerance": 70,
+      "enabled": true
+    },
+    "center_confirm": {
+      "label": "Confirm centro",
+      "x": 586,
+      "y": 596,
+      "color": "#F8C35A",
+      "tolerance": 70,
+      "enabled": true
+    }
+  },
+  "routine_rules": {
+    "end_confirm_yellow": {
+      "label": "Confirm amarelo",
+      "x": 1360,
+      "y": 858,
+      "color": "#eebe55",
+      "tolerance": 30,
+      "delay_seconds": 3.000000000000001,
+      "enabled": true
+    },
+    "one_more_match": {
+      "label": "One More Match",
+      "x": 1188,
+      "y": 841,
+      "color": "#365597",
+      "tolerance": 10,
+      "delay_seconds": 1.0,
+      "enabled": true
+    },
+    "center_confirm": {
+      "label": "Confirm centro",
+      "x": 642,
+      "y": 674,
+      "color": "#fbe57c",
+      "tolerance": 10,
+      "delay_seconds": 0.19999999999999937,
+      "enabled": true
+    }
+  },
+  "routine_sequences": {
+    "match_end_restart": {
+      "label": "Fim de partida: jogar de novo",
+      "enabled": true,
+      "cooldown_seconds": 2.0,
+      "steps": [
+        {
+          "enabled": true,
+          "label": "Confirm amarelo 3x",
+          "detect": "end_confirm_yellow",
+          "condition": "match",
+          "click_mode": "detect",
+          "click_probe": "",
+          "x": 0,
+          "y": 0,
+          "delay_seconds": 0.4,
+          "repeat": 3,
+          "next": "advance"
+        },
+        {
+          "enabled": true,
+          "label": "Nova etapa",
+          "detect": "end_confirm_yellow",
+          "condition": "match",
+          "click_mode": "detect",
+          "click_probe": "",
+          "x": 0,
+          "y": 0,
+          "delay_seconds": 0.5,
+          "repeat": 1,
+          "next": "advance"
+        },
+        {
+          "enabled": true,
+          "label": "One More Match",
+          "detect": "one_more_match",
+          "condition": "match",
+          "click_mode": "detect",
+          "click_probe": "",
+          "x": 0,
+          "y": 0,
+          "delay_seconds": 0.8,
+          "repeat": 1,
+          "next": "advance"
+        },
+        {
+          "enabled": true,
+          "label": "Confirm centro",
+          "detect": "center_confirm",
+          "condition": "match",
+          "click_mode": "detect",
+          "click_probe": "",
+          "x": 0,
+          "y": 0,
+          "delay_seconds": 5.0,
+          "repeat": 1,
+          "next": "reset"
+        }
+      ]
     }
   },
   "routines": {
@@ -302,18 +447,21 @@
           "trigger": "routine_match_end_yellow",
           "click": "routine_match_end_yellow",
           "until": "routine_one_more_match",
-          "label": "fechar tela amarela ate aparecer One More Match"
+          "label": "fechar tela amarela ate aparecer One More Match",
+          "delay_seconds": 0.0
         },
         {
           "trigger": "routine_one_more_match",
           "click": "routine_one_more_match",
           "until": "routine_confirm",
-          "label": "clicar One More Match"
+          "label": "clicar One More Match",
+          "delay_seconds": 0.0
         },
         {
           "trigger": "routine_confirm",
           "click": "routine_confirm",
-          "label": "confirmar nova partida"
+          "label": "confirmar nova partida",
+          "delay_seconds": 5.0
         }
       ]
     }
@@ -321,9 +469,9 @@
   "regions": {
     "player_hand": {
       "label": "Mao jogador",
-      "x": 150,
+      "x": 152,
       "y": 783,
-      "w": 1353,
+      "w": 1390,
       "h": 150,
       "color": "#22C55E",
       "enabled": true
@@ -339,17 +487,17 @@
     },
     "left_opponent_tiles": {
       "label": "Mao/chamadas esquerda",
-      "x": 132,
-      "y": 120,
-      "w": 221,
+      "x": 136,
+      "y": 95,
+      "w": 204,
       "h": 616,
       "color": "#F59E0B",
       "enabled": true
     },
     "top_opponent_tiles": {
       "label": "Mao/chamadas frente",
-      "x": 323,
-      "y": 40,
+      "x": 349,
+      "y": 37,
       "w": 931,
       "h": 86,
       "color": "#A855F7",
@@ -357,17 +505,17 @@
     },
     "right_opponent_tiles": {
       "label": "Mao/chamadas direita",
-      "x": 1259,
-      "y": 129,
+      "x": 1215,
+      "y": 74,
       "w": 292,
-      "h": 641,
+      "h": 670,
       "color": "#38BDF8",
       "enabled": true
     },
     "dora_indicators": {
       "label": "Doras",
-      "x": 20,
-      "y": 70,
+      "x": 22,
+      "y": 68,
       "w": 242,
       "h": 84,
       "color": "#F43F5E",
@@ -393,30 +541,69 @@
     },
     "discard_left": {
       "label": "Descartes esquerda",
-      "x": 394,
-      "y": 280,
-      "w": 255,
-      "h": 204,
+      "x": 385,
+      "y": 276,
+      "w": 263,
+      "h": 225,
       "color": "#F59E0B",
       "enabled": true
     },
     "discard_top": {
       "label": "Descartes frente",
-      "x": 662,
-      "y": 141,
-      "w": 268,
-      "h": 155,
+      "x": 656,
+      "y": 137,
+      "w": 287,
+      "h": 165,
       "color": "#A855F7",
       "enabled": true
     },
     "discard_right": {
       "label": "Descartes direita",
-      "x": 951,
+      "x": 941,
       "y": 277,
-      "w": 292,
-      "h": 222,
+      "w": 307,
+      "h": 241,
+      "color": "#38BDF8",
+      "enabled": true
+    },
+    "score_player": {
+      "label": "Pontuacao jogador",
+      "x": 747,
+      "y": 417,
+      "w": 93,
+      "h": 31,
+      "color": "#22C55E",
+      "enabled": true
+    },
+    "score_left": {
+      "label": "Pontuacao esquerda",
+      "x": 704,
+      "y": 348,
+      "w": 41,
+      "h": 79,
+      "color": "#F59E0B",
+      "enabled": true
+    },
+    "score_top": {
+      "label": "Pontuacao frente",
+      "x": 744,
+      "y": 319,
+      "w": 96,
+      "h": 40,
+      "color": "#A855F7",
+      "enabled": true
+    },
+    "score_right": {
+      "label": "Pontuacao direita",
+      "x": 852,
+      "y": 348,
+      "w": 35,
+      "h": 75,
       "color": "#38BDF8",
       "enabled": true
     }
-  }
+  },
+  "capture_interval_seconds": 180.0,
+  "capture_min_detections": 75,
+  "capture_min_hand_tiles": 14
 }

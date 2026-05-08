@@ -8,6 +8,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT / "mahjongmaster_colab_dataset.zip"
 INCLUDED_EXTENSIONS = {".yaml", ".yml", ".png", ".jpg", ".jpeg", ".txt"}
+WORKSPACE_FILES = (
+    ROOT / "requirements-train.txt",
+    ROOT / "scripts" / "train_yolo.py",
+    ROOT / "scripts" / "balance_red_five_dataset.py",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +42,16 @@ def add_tree(zip_file: ZipFile, directory: Path, include_raw: bool) -> int:
     return count
 
 
+def add_workspace_files(zip_file: ZipFile) -> int:
+    count = 0
+    for path in WORKSPACE_FILES:
+        if not path.exists():
+            continue
+        zip_file.write(path, path.relative_to(ROOT))
+        count += 1
+    return count
+
+
 def main() -> None:
     args = parse_args()
     output = Path(args.output)
@@ -44,6 +59,7 @@ def main() -> None:
 
     with ZipFile(output, "w", ZIP_DEFLATED) as zip_file:
         file_count = 0
+        file_count += add_workspace_files(zip_file)
         file_count += add_tree(zip_file, ROOT / "data", args.include_raw)
         file_count += add_tree(zip_file, ROOT / "dataset", args.include_raw)
 
