@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -702,6 +704,8 @@ class TrainingWindow(QMainWindow):
         self.populate_training_models()
         self.model_combo.currentTextChanged.connect(self.update_auto_run_name)
         self.device_combo = QComboBox()
+        self.gpu_status_label = QLabel()
+        self.gpu_status_label.setWordWrap(True)
         self.populate_devices()
         self.epochs_input = QSpinBox()
         self.epochs_input.setRange(1, 5000)
@@ -754,6 +758,7 @@ class TrainingWindow(QMainWindow):
         form.addRow("Batch", self.batch_input)
         form.addRow("Patience", self.patience_input)
         form.addRow("Device", self.device_combo)
+        form.addRow("GPUs", self.gpu_status_label)
 
         controls = QHBoxLayout()
         controls.addWidget(self.start_button)
@@ -795,19 +800,114 @@ class TrainingWindow(QMainWindow):
         self.refresh_plot()
 
     def populate_devices(self) -> None:
+        self.device_combo.clear()
         self.device_combo.addItem("CPU", "cpu")
+        torch_cuda_available = False
+        torch_version = "-"
+        cuda_version = "-"
         try:
             import torch
         except ImportError:
-            return
+            torch = None
+        else:
+            torch_version = str(getattr(torch, "__version__", "-"))
+            cuda_version = str(getattr(getattr(torch, "version", None), "cuda", None) or "CPU-only")
+            torch_cuda_available = bool(torch.cuda.is_available())
 
-        if not torch.cuda.is_available():
-            return
+        cuda_names: list[str] = []
+        if torch is not None and torch_cuda_available:
+            for index in range(torch.cuda.device_count()):
+                name = torch.cuda.get_device_name(index)
+                cuda_names.append(name)
+                self.device_combo.addItem(f"GPU {index}: {name}", str(index))
+            self.device_combo.setCurrentIndex(1)
 
-        for index in range(torch.cuda.device_count()):
-            name = torch.cuda.get_device_name(index)
-            self.device_combo.addItem(f"GPU {index}: {name}", str(index))
-        self.device_combo.setCurrentIndex(1)
+        nvidia_names = self.nvidia_smi_gpu_names()
+        windows_names = self.windows_gpu_names()
+        visible_names = list(dict.fromkeys([*windows_names, *nvidia_names, *cuda_names]))
+
+        if not torch_cuda_available and nvidia_names:
+            for index, name in enumerate(nvidia_names):
+                self.device_combo.addItem(f"NVIDIA {index}: {name} (PyTorch CUDA off)", "cpu")
+                item = self.device_combo.model().item(self.device_combo.count() - 1)
+                if item is not None:
+                    item.setEnabled(False)
+
+        self.gpu_status_label.setText(
+            self.gpu_status_text(
+                torch_version=torch_version,
+                cuda_version=cuda_version,
+                torch_cuda_available=torch_cuda_available,
+                visible_names=visible_names,
+                nvidia_names=nvidia_names,
+            )
+        )
+
+    @staticmethod
+    def nvidia_smi_gpu_names() -> list[str]:
+        nvidia_smi = shutil.which("nvidia-smi")
+        if not nvidia_smi:
+            return []
+        try:
+            output = subprocess.check_output(
+                [nvidia_smi, "--query-gpu=name", "--format=csv,noheader"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+        except Exception:
+            return []
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    @staticmethod
+    def windows_gpu_names() -> list[str]:
+        if sys.platform != "win32":
+            return []
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_VideoController | "
+            "Select-Object -ExpandProperty Name | ConvertTo-Json -Compress",
+        ]
+        try:
+            output = subprocess.check_output(
+                command,
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=4,
+            ).strip()
+        except Exception:
+            return []
+        if not output:
+            return []
+        try:
+            parsed = json.loads(output)
+        except json.JSONDecodeError:
+            return [line.strip() for line in output.splitlines() if line.strip()]
+        if isinstance(parsed, str):
+            return [parsed]
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if item]
+        return []
+
+    @staticmethod
+    def gpu_status_text(
+        *,
+        torch_version: str,
+        cuda_version: str,
+        torch_cuda_available: bool,
+        visible_names: list[str],
+        nvidia_names: list[str],
+    ) -> str:
+        detected = ", ".join(visible_names) if visible_names else "nenhuma GPU detectada pelo sistema"
+        torch_state = "CUDA OK" if torch_cuda_available else "CUDA indisponivel"
+        hint = ""
+        if not torch_cuda_available and nvidia_names:
+            hint = " | NVIDIA existe, mas o PyTorch instalado nao tem CUDA; instale torch com CUDA."
+        elif not nvidia_names and any("AMD" in name.upper() or "RADEON" in name.upper() for name in visible_names):
+            hint = " | AMD aparece no Windows, mas treino YOLO usa CUDA; vai ficar em CPU sem backend compativel."
+        return f"{detected} | PyTorch {torch_version} / CUDA {cuda_version}: {torch_state}{hint}"
 
     def build_help_group(self, title: str, label: QLabel) -> QGroupBox:
         group = QGroupBox(title)

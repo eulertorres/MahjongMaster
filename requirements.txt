@@ -3,6 +3,5 @@ mss>=9.0
 numpy>=1.26
 torch>=2.11
 ultralytics>=8.4
-ultralytics>=8.3
 ipywidgets>=8
 tensorboard>=2.15
